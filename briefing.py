@@ -3,6 +3,7 @@ import html
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -78,10 +79,6 @@ NEWS = [
         ("MBC", "https://imnews.imbc.com/rss/google_news/politics.rss"),
         ("JTBC", "https://news-ex.jtbc.co.kr/v1/get/rss/section/politics"),
     ], "정치"),
-    ("🗞 딴지일보", [
-        ("딴지일보", "https://www.ddanzi.com/ddanziNews/rss"),
-        ("딴지일보", "https://www.ddanzi.com/rss"),
-    ], "딴지일보"),
     ("💰 경제", [
         ("MBC", "https://imnews.imbc.com/rss/google_news/economy.rss"),
         ("JTBC", "https://news-ex.jtbc.co.kr/v1/get/rss/section/economy"),
@@ -97,8 +94,8 @@ NEWS = [
 ]
 NEWS_PER_SECTION = 3      # 분야별로 보여줄 기사 수
 NEWS_CANDIDATES = 12      # AI에게 넘겨줄 분야별 후보 기사 수
-# 위에서부터 차례로 시도 (하나가 막히면 다음 모델로)
-GEMINI_MODELS = ["gemini-2.5-flash", "gemini-flash-latest", "gemini-2.0-flash", "gemini-2.5-flash-lite"]
+# 먼저 시도할 모델 (안 되면 구글에서 지금 쓸 수 있는 flash 모델 목록을 받아 차례로 시도)
+GEMINI_PREFERRED = ["gemini-flash-latest", "gemini-flash-lite-latest"]
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36"}
 
 
@@ -164,6 +161,27 @@ def collect_news():
     return collected
 
 
+def gemini_models(key):
+    """시도할 모델 순서: 선호 모델 → 지금 쓸 수 있는 flash 모델들"""
+    models = list(GEMINI_PREFERRED)
+    try:
+        req = urllib.request.Request("https://generativelanguage.googleapis.com/v1beta/models?pageSize=100",
+                                     headers={"x-goog-api-key": key})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            listing = json.loads(resp.read().decode("utf-8"))
+        found = []
+        for m in listing.get("models", []):
+            name = m.get("name", "").removeprefix("models/")
+            if ("flash" in name and "generateContent" in m.get("supportedGenerationMethods", [])
+                    and not any(x in name for x in ("image", "tts", "live", "audio", "embed", "preview", "exp"))):
+                found.append(name)
+        found.sort(reverse=True)  # 숫자가 큰(최신) 모델부터
+        models += [n for n in found if n not in models]
+    except Exception as e:
+        print(f"[Gemini 모델 목록 실패] {e}")
+    return models[:6]
+
+
 def ai_summarize(collected):
     """Gemini가 분야별로 중요한 기사를 골라 짧게 요약합니다."""
     key = os.environ.get("GEMINI_API_KEY")
@@ -192,22 +210,30 @@ def ai_summarize(collected):
     }).encode("utf-8")
     errors = []
     text = None
-    for model in GEMINI_MODELS:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        req = urllib.request.Request(url, data=body, method="POST",
-                                     headers={"Content-Type": "application/json", "x-goog-api-key": key})
-        try:
-            with urllib.request.urlopen(req, timeout=90) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            text = data["candidates"][0]["content"]["parts"][0]["text"]
+    for model in gemini_models(key):
+        for attempt in range(3):  # 503(사용량 몰림)이면 잠깐 쉬었다가 재시도
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+            req = urllib.request.Request(url, data=body, method="POST",
+                                         headers={"Content-Type": "application/json", "x-goog-api-key": key})
+            try:
+                with urllib.request.urlopen(req, timeout=90) as resp:
+                    data = json.loads(resp.read().decode("utf-8"))
+                text = data["candidates"][0]["content"]["parts"][0]["text"]
+                break
+            except urllib.error.HTTPError as e:
+                detail = e.read().decode("utf-8", "replace")[:300]
+                print(f"[Gemini {model}] HTTP {e.code}: {detail}")  # Actions 로그에서 확인용
+                if e.code in (500, 503) and attempt < 2:
+                    time.sleep(15)
+                    continue
+                errors.append(f"{model} {e.code}")
+                break
+            except Exception as e:
+                print(f"[Gemini {model}] {type(e).__name__}: {e}")
+                errors.append(f"{model} {type(e).__name__}")
+                break
+        if text is not None:
             break
-        except urllib.error.HTTPError as e:
-            detail = e.read().decode("utf-8", "replace")[:500]
-            print(f"[Gemini {model}] HTTP {e.code}: {detail}")  # Actions 로그에서 확인용
-            errors.append(f"{model} {e.code}")
-        except Exception as e:
-            print(f"[Gemini {model}] {type(e).__name__}: {e}")
-            errors.append(f"{model} {type(e).__name__}")
     if text is None:
         raise RuntimeError(", ".join(errors))
     text = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
