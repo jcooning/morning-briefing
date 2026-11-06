@@ -1,7 +1,8 @@
-"""아침 브리핑 생성기 - briefing.txt 를 새로 씁니다."""
+"""아침 브리핑 생성기 - briefing.txt / briefing2.txt 를 새로 씁니다."""
 import html
 import json
 import os
+import random
 import re
 import time
 import urllib.error
@@ -9,7 +10,7 @@ import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import yfinance as yf
@@ -54,15 +55,151 @@ def fmt_change(last, prev):
     return f"{arrow}{abs(pct):.1f}%"
 
 
+# ---------------- 날씨 (Open-Meteo, 서울) ----------------
+WEATHER_URL = ("https://api.open-meteo.com/v1/forecast?latitude=37.5665&longitude=126.978"
+               "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+               "&timezone=Asia%2FSeoul&forecast_days=4")
+WEATHER_CODES = [  # (코드 상한, 이모지, 상태)
+    (0, "☀️", "맑음"), (2, "🌤", "구름 조금"), (3, "☁️", "흐림"), (48, "🌫", "안개"),
+    (57, "🌦", "이슬비"), (67, "🌧", "비"), (77, "🌨", "눈"), (82, "🌧", "소나기"),
+    (86, "🌨", "눈"), (99, "⛈", "뇌우"),
+]
+
+
+def weather_desc(code):
+    for limit, emoji, text in WEATHER_CODES:
+        if code <= limit:
+            return emoji, text
+    return "🌡", "-"
+
+
+def get_weather():
+    req = urllib.request.Request(WEATHER_URL, headers=UA)
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        d = json.loads(resp.read().decode("utf-8"))["daily"]
+    days = []
+    for i, day in enumerate(d["time"]):
+        emoji, text = weather_desc(int(d["weather_code"][i]))
+        days.append({
+            "date": datetime.strptime(day, "%Y-%m-%d"), "emoji": emoji, "text": text,
+            "max": round(d["temperature_2m_max"][i]), "min": round(d["temperature_2m_min"][i]),
+            "rain": d["precipitation_probability_max"][i] or 0,
+        })
+    return days
+
+
+def weather_line(day):
+    return f"{day['emoji']} {day['text']} · 최고 {day['max']}° / 최저 {day['min']}° · 강수 {day['rain']}%"
+
+
+def today_weather(days):
+    return "서울 " + weather_line(days[0])
+
+
+def weekend_weather(days):
+    lines = ["🗓 주말 날씨 (서울)"]
+    for day in days[1:3]:  # 금요일 기준 토·일
+        lines.append(f"{day['date'].month}/{day['date'].day}({WEEKDAYS[day['date'].weekday()]}) {weather_line(day)}")
+    return "\n".join(lines)
+
+
+# ---------------- 금리 ----------------
+def ecos(stat, cycle, start, end, item):
+    """한국은행 경제통계(ECOS) 조회 — 마지막 값들"""
+    url = f"https://ecos.bok.or.kr/api/StatisticSearch/sample/json/kr/1/10/{stat}/{cycle}/{start}/{end}/{item}"
+    req = urllib.request.Request(url, headers=UA)
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        rows = json.loads(resp.read().decode("utf-8"))["StatisticSearch"]["row"]
+    return [float(r["DATA_VALUE"]) for r in rows]
+
+
+def rate_change(last, prev):
+    diff = last - prev
+    arrow = "▲" if diff > 0 else ("▼" if diff < 0 else "-")
+    return f"{arrow}{abs(diff):.2f}"
+
+
+def rates_line(closes):
+    now = datetime.now(KST)
+    parts = []
+    try:
+        base = ecos("722Y001", "M", f"{now.year - 1}{now.month:02d}", f"{now.year}{now.month:02d}", "0101000")
+        parts.append(f"기준 {base[-1]:.2f}%")
+    except Exception as e:
+        print(f"[금리 기준] 실패: {type(e).__name__}")
+    try:
+        start = (now - timedelta(days=9)).strftime("%Y%m%d")
+        govt = ecos("817Y002", "D", start, now.strftime("%Y%m%d"), "010200000")
+        parts.append(f"국고3년 {govt[-1]:.2f}% ({rate_change(govt[-1], govt[-2])})")
+    except Exception as e:
+        print(f"[금리 국고3년] 실패: {type(e).__name__}")
+    try:
+        series = closes["^TNX"].dropna() if "^TNX" in closes else None
+        if series is None or len(series) < 2:
+            series = yf.Ticker("^TNX").history(period="10d")["Close"].dropna()
+        parts.append(f"미국10년 {float(series.iloc[-1]):.2f}% ({rate_change(float(series.iloc[-1]), float(series.iloc[-2]))})")
+    except Exception as e:
+        print(f"[금리 미국10년] 실패: {type(e).__name__}")
+    return "금리 " + " · ".join(parts) if parts else "금리 조회 실패"
+
+
+# ---------------- 오늘의 말씀 (개역한글) ----------------
+# (책 번호, 책 이름, 장, 절) — 날짜마다 하나씩 무작위로 고름
+VERSES = [
+    (1, "창세기", 1, 1), (1, "창세기", 28, 15), (2, "출애굽기", 14, 14), (5, "신명기", 31, 6),
+    (6, "여호수아", 1, 9), (9, "사무엘상", 16, 7), (19, "시편", 1, 1), (19, "시편", 16, 8),
+    (19, "시편", 18, 2), (19, "시편", 23, 1), (19, "시편", 23, 4), (19, "시편", 27, 1),
+    (19, "시편", 34, 8), (19, "시편", 37, 4), (19, "시편", 37, 5), (19, "시편", 46, 1),
+    (19, "시편", 46, 10), (19, "시편", 55, 22), (19, "시편", 62, 1), (19, "시편", 90, 12),
+    (19, "시편", 91, 1), (19, "시편", 103, 2), (19, "시편", 118, 24), (19, "시편", 119, 105),
+    (19, "시편", 121, 1), (19, "시편", 121, 2), (19, "시편", 127, 1), (19, "시편", 133, 1),
+    (19, "시편", 139, 14), (19, "시편", 145, 18), (19, "시편", 147, 3), (20, "잠언", 3, 5),
+    (20, "잠언", 3, 6), (20, "잠언", 4, 23), (20, "잠언", 16, 3), (20, "잠언", 16, 9),
+    (20, "잠언", 17, 17), (20, "잠언", 18, 10), (20, "잠언", 22, 6), (20, "잠언", 27, 17),
+    (21, "전도서", 3, 1), (21, "전도서", 4, 9), (23, "이사야", 26, 3), (23, "이사야", 40, 31),
+    (23, "이사야", 41, 10), (23, "이사야", 43, 2), (23, "이사야", 43, 19), (23, "이사야", 55, 8),
+    (24, "예레미야", 29, 11), (24, "예레미야", 33, 3), (25, "예레미야애가", 3, 22), (25, "예레미야애가", 3, 23),
+    (33, "미가", 6, 8), (35, "하박국", 3, 18), (36, "스바냐", 3, 17), (40, "마태복음", 5, 9),
+    (40, "마태복음", 5, 14), (40, "마태복음", 6, 33), (40, "마태복음", 6, 34), (40, "마태복음", 7, 7),
+    (40, "마태복음", 7, 12), (40, "마태복음", 11, 28), (40, "마태복음", 22, 37), (40, "마태복음", 28, 20),
+    (41, "마가복음", 9, 23), (41, "마가복음", 10, 27), (42, "누가복음", 1, 37), (42, "누가복음", 6, 31),
+    (43, "요한복음", 1, 5), (43, "요한복음", 3, 16), (43, "요한복음", 8, 32), (43, "요한복음", 10, 10),
+    (43, "요한복음", 13, 34), (43, "요한복음", 14, 1), (43, "요한복음", 14, 6), (43, "요한복음", 14, 27),
+    (43, "요한복음", 15, 5), (43, "요한복음", 16, 33), (45, "로마서", 5, 8), (45, "로마서", 8, 18),
+    (45, "로마서", 8, 28), (45, "로마서", 8, 31), (45, "로마서", 12, 2), (45, "로마서", 12, 12),
+    (45, "로마서", 15, 13), (46, "고린도전서", 10, 13), (46, "고린도전서", 13, 4), (46, "고린도전서", 13, 13),
+    (46, "고린도전서", 16, 14), (47, "고린도후서", 4, 18), (47, "고린도후서", 5, 17), (47, "고린도후서", 12, 9),
+    (48, "갈라디아서", 5, 22), (48, "갈라디아서", 6, 9), (49, "에베소서", 2, 8), (49, "에베소서", 4, 32),
+    (50, "빌립보서", 1, 6), (50, "빌립보서", 4, 6), (50, "빌립보서", 4, 7), (50, "빌립보서", 4, 13),
+    (50, "빌립보서", 4, 19), (51, "골로새서", 3, 23), (52, "데살로니가전서", 5, 16), (52, "데살로니가전서", 5, 17),
+    (52, "데살로니가전서", 5, 18), (55, "디모데후서", 1, 7), (58, "히브리서", 11, 1), (58, "히브리서", 12, 1),
+    (58, "히브리서", 13, 8), (59, "야고보서", 1, 5), (59, "야고보서", 1, 17), (59, "야고보서", 4, 8),
+    (60, "베드로전서", 5, 7), (62, "요한일서", 1, 9), (62, "요한일서", 4, 18), (62, "요한일서", 4, 19),
+    (66, "요한계시록", 21, 4),
+]
+
+
+def bible_section():
+    now = datetime.now(KST)
+    pick = random.Random(now.strftime("%Y%m%d")).choice(VERSES)  # 같은 날은 같은 구절
+    book, name, chapter, verse = pick
+    req = urllib.request.Request(f"https://bolls.life/get-verse/KRV/{book}/{chapter}/{verse}/", headers=UA)
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        text = clean(json.loads(resp.read().decode("utf-8"))["text"])
+    return f"📖 오늘의 말씀\n{text}\n— {name} {chapter}:{verse} (개역한글)"
+
+
 def market_section():
     items = MARKET + STOCKS
-    codes = [code for _, code, _ in items]
+    codes = [code for _, code, _ in items] + ["^TNX"]  # ^TNX = 미국 10년 국채금리
     closes = yf.download(codes, period="10d", progress=False, auto_adjust=False)["Close"]
 
     lines = ["📈 증시"]
     for i, (name, code, unit) in enumerate(items):
         if i in (4, 7, len(MARKET)):
             lines.append("")  # 지수 / 환율 / 코인 / 종목 사이 빈 줄
+        if i == 4:
+            lines.append(rates_line(closes))  # 금리는 달러 위에
         try:
             series = closes[code].dropna() if code in closes else None
             if series is None or len(series) < 2:
@@ -352,8 +489,15 @@ def gold_section():
 def main():
     now = datetime.now(KST)
     header = f"☀ {now.month}/{now.day}({WEEKDAYS[now.weekday()]}) 아침 브리핑"
+    try:
+        days = get_weather()
+    except Exception as e:
+        print(f"[날씨] 실패: {e}")
+        days = None
 
-    sections = [header]
+    # briefing.txt — 제목·날씨·증시·뉴스·국제 금 (이 뒤에 아이폰이 순금 시세를 붙임)
+    top = header + "\n" + (today_weather(days) if days else "날씨 조회 실패")
+    sections = [top]
     try:
         sections.append(market_section())
     except Exception as e:
@@ -366,10 +510,23 @@ def main():
         sections.append(gold_section())
     except Exception as e:
         sections.append(f"🥇 금시세\n국제 금 조회 실패 ({type(e).__name__})")
-
     with open("briefing.txt", "w", encoding="utf-8") as f:
         f.write("\n\n".join(sections) + "\n")
+
+    # briefing2.txt — (금요일) 주말 날씨 + 오늘의 말씀 (메시지 맨 아래)
+    bottom = []
+    if now.weekday() == 4 and days:
+        bottom.append(weekend_weather(days))
+    try:
+        bottom.append(bible_section())
+    except Exception as e:
+        print(f"[성경] 실패: {e}")
+    with open("briefing2.txt", "w", encoding="utf-8") as f:
+        f.write("\n\n".join(bottom) + "\n")
+
     print("\n\n".join(sections))
+    print("=" * 20)
+    print("\n\n".join(bottom))
 
 
 if __name__ == "__main__":
