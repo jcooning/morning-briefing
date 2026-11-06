@@ -16,6 +16,7 @@ MARKET = [
     ("달러", "KRW=X", "fx"),
     ("유로", "EURKRW=X", "fx"),
     ("엔화(100엔)", "JPYKRW=X", "fx100"),
+    ("비트코인", "BTC-KRW", "krw"),
 ]
 STOCKS = [
     ("SK하이닉스", "000660.KS", "krw"),
@@ -50,10 +51,12 @@ def market_section():
 
     lines = ["📈 증시"]
     for i, (name, code, unit) in enumerate(items):
-        if i in (4, len(MARKET)):
-            lines.append("")  # 지수 / 환율 / 종목 사이 빈 줄
+        if i in (4, 7, len(MARKET)):
+            lines.append("")  # 지수 / 환율 / 코인 / 종목 사이 빈 줄
         try:
-            series = closes[code].dropna()
+            series = closes[code].dropna() if code in closes else None
+            if series is None or len(series) < 2:
+                series = yf.Ticker(code).history(period="10d")["Close"].dropna()  # 재시도
             last, prev = float(series.iloc[-1]), float(series.iloc[-2])
             lines.append(f"{name} {fmt_price(last, unit)} ({fmt_change(last, prev)})")
         except Exception:
