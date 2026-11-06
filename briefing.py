@@ -1,4 +1,8 @@
 """아침 브리핑 생성기 - briefing.txt 를 새로 씁니다."""
+import re
+import urllib.parse
+import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -64,6 +68,88 @@ def market_section():
     return "\n".join(lines)
 
 
+# 뉴스: 분야별로 위에서부터 시도하고, 다 안 되면 구글 뉴스 검색으로 대체
+NEWS = [
+    ("📰 정치", [
+        ("MBC", "https://imnews.imbc.com/rss/google_news/politics.rss"),
+        ("JTBC", "https://news-ex.jtbc.co.kr/v1/get/rss/section/politics"),
+    ], "정치"),
+    ("🗞 딴지일보", [
+        ("딴지일보", "https://www.ddanzi.com/ddanziNews/rss"),
+        ("딴지일보", "https://www.ddanzi.com/rss"),
+    ], "딴지일보"),
+    ("💰 경제", [
+        ("MBC", "https://imnews.imbc.com/rss/google_news/economy.rss"),
+        ("JTBC", "https://news-ex.jtbc.co.kr/v1/get/rss/section/economy"),
+    ], "경제"),
+    ("💻 IT", [
+        ("전자신문", "https://rss.etnews.com/Section901.xml"),
+        ("ZDNet", "https://feeds.feedburner.com/zdkorea"),
+    ], "IT 인공지능"),
+    ("🏠 부동산", [
+        ("한국경제", "https://www.hankyung.com/feed/realestate"),
+        ("매일경제", "https://www.mk.co.kr/rss/50300009/"),
+    ], "부동산 청약"),
+]
+NEWS_PER_SECTION = 3
+UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36"}
+
+
+def fetch_titles(url):
+    req = urllib.request.Request(url, headers=UA)
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        root = ET.fromstring(resp.read())
+    titles = []
+    for item in root.iter():
+        if item.tag.split("}")[-1] in ("item", "entry"):
+            for child in item:
+                if child.tag.split("}")[-1] == "title" and child.text:
+                    titles.append(re.sub(r"\s+", " ", child.text).strip())
+                    break
+    return titles
+
+
+def google_news(query):
+    q = urllib.parse.quote(f"{query} when:1d")
+    url = f"https://news.google.com/rss/search?q={q}&hl=ko&gl=KR&ceid=KR:ko"
+    results = []
+    for t in fetch_titles(url):
+        title, _, source = t.rpartition(" - ")  # 구글 뉴스 제목 끝의 " - 언론사" 분리
+        results.append((source or "뉴스", title or t))
+    return results
+
+
+def news_section():
+    blocks = []
+    for heading, feeds, query in NEWS:
+        picked = []
+        for source, url in feeds:
+            try:
+                picked = [(source, t) for t in fetch_titles(url)]
+            except Exception:
+                picked = []
+            if picked:
+                break
+        if not picked:
+            try:
+                picked = google_news(query)
+            except Exception:
+                picked = []
+        lines = [heading]
+        seen = set()
+        for source, title in picked:
+            if title in seen:
+                continue
+            seen.add(title)
+            lines.append(f"· {title} [{source}]")
+            if len(lines) > NEWS_PER_SECTION:
+                break
+        if len(lines) == 1:
+            lines.append("· 가져오지 못했어요")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
 def gold_section():
     """국제 금 시세 (뉴욕 금 선물, 달러/온스)"""
     series = yf.download(["GC=F"], period="10d", progress=False, auto_adjust=False)["Close"]["GC=F"].dropna()
@@ -80,6 +166,10 @@ def main():
         sections.append(market_section())
     except Exception as e:
         sections.append(f"📈 증시\n조회 실패 ({type(e).__name__})")
+    try:
+        sections.append(news_section())
+    except Exception as e:
+        sections.append(f"📰 뉴스\n조회 실패 ({type(e).__name__})")
     try:
         sections.append(gold_section())
     except Exception as e:
