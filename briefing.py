@@ -1,5 +1,4 @@
 """아침 브리핑 생성기 - briefing.txt 를 새로 씁니다."""
-import http.cookiejar
 import json
 import urllib.request
 from datetime import datetime
@@ -66,23 +65,21 @@ def market_section():
 
 def fetch_koreagold():
     """한국금거래소 시세 데이터(JSON)를 가져옵니다."""
-    jar = http.cookiejar.CookieJar()
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(jar))
     ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36"
-    opener.open(urllib.request.Request("https://www.koreagoldx.co.kr/", headers={"User-Agent": ua}), timeout=20)
     req = urllib.request.Request(
         "https://www.koreagoldx.co.kr/api/main",
-        data=b"",
+        data=b"{}",
         method="POST",
         headers={
             "User-Agent": ua,
             "X-Requested-With": "XMLHttpRequest",
             "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "Content-Type": "application/json",
+            "Origin": "https://www.koreagoldx.co.kr",
             "Referer": "https://www.koreagoldx.co.kr/",
         },
     )
-    with opener.open(req, timeout=20) as resp:
+    with urllib.request.urlopen(req, timeout=20) as resp:
         return json.loads(resp.read().decode("utf-8"))
 
 
@@ -134,7 +131,7 @@ def main():
     try:
         sections.append(gold_section())
     except Exception as e:
-        sections.append(f"🥇 금시세\n조회 실패 ({type(e).__name__})")
+        sections.append(f"🥇 금시세\n조회 실패 ({type(e).__name__} {getattr(e, 'code', '')})")
 
     with open("briefing.txt", "w", encoding="utf-8") as f:
         f.write("\n\n".join(sections) + "\n")
