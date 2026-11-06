@@ -1,4 +1,7 @@
 """아침 브리핑 생성기 - briefing.txt 를 새로 씁니다."""
+import html
+import json
+import os
 import re
 import urllib.parse
 import urllib.request
@@ -91,41 +94,56 @@ NEWS = [
         ("매일경제", "https://www.mk.co.kr/rss/50300009/"),
     ], "부동산 청약"),
 ]
-NEWS_PER_SECTION = 3
+NEWS_PER_SECTION = 3      # 분야별로 보여줄 기사 수
+NEWS_CANDIDATES = 12      # AI에게 넘겨줄 분야별 후보 기사 수
+GEMINI_MODEL = "gemini-flash-latest"
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36"}
 
 
-def fetch_titles(url):
+def clean(text):
+    text = html.unescape(re.sub(r"<[^>]+>", " ", text or ""))
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def fetch_items(url):
+    """RSS에서 (제목, 설명) 목록을 가져옵니다."""
     req = urllib.request.Request(url, headers=UA)
     with urllib.request.urlopen(req, timeout=15) as resp:
         root = ET.fromstring(resp.read())
-    titles = []
-    for item in root.iter():
-        if item.tag.split("}")[-1] in ("item", "entry"):
-            for child in item:
-                if child.tag.split("}")[-1] == "title" and child.text:
-                    titles.append(re.sub(r"\s+", " ", child.text).strip())
-                    break
-    return titles
+    items = []
+    for node in root.iter():
+        if node.tag.split("}")[-1] not in ("item", "entry"):
+            continue
+        title = desc = ""
+        for child in node:
+            tag = child.tag.split("}")[-1]
+            if tag == "title":
+                title = clean(child.text)
+            elif tag in ("description", "summary") and not desc:
+                desc = clean(child.text)[:300]
+        if title:
+            items.append((title, desc))
+    return items
 
 
 def google_news(query):
     q = urllib.parse.quote(f"{query} when:1d")
     url = f"https://news.google.com/rss/search?q={q}&hl=ko&gl=KR&ceid=KR:ko"
     results = []
-    for t in fetch_titles(url):
-        title, _, source = t.rpartition(" - ")  # 구글 뉴스 제목 끝의 " - 언론사" 분리
-        results.append((source or "뉴스", title or t))
+    for title, _ in fetch_items(url):
+        head, _, source = title.rpartition(" - ")  # 구글 뉴스 제목 끝의 " - 언론사" 분리
+        results.append((source or "뉴스", head or title, ""))
     return results
 
 
-def news_section():
-    blocks = []
+def collect_news():
+    """분야별 후보 기사 [(분야, [(출처, 제목, 설명), ...]), ...]"""
+    collected = []
     for heading, feeds, query in NEWS:
         picked = []
         for source, url in feeds:
             try:
-                picked = [(source, t) for t in fetch_titles(url)]
+                picked = [(source, t, d) for t, d in fetch_items(url)]
             except Exception:
                 picked = []
             if picked:
@@ -135,19 +153,78 @@ def news_section():
                 picked = google_news(query)
             except Exception:
                 picked = []
+        seen, unique = set(), []
+        for item in picked:
+            if item[1] not in seen:
+                seen.add(item[1])
+                unique.append(item)
+        collected.append((heading, unique[:NEWS_CANDIDATES]))
+    return collected
+
+
+def ai_summarize(collected):
+    """Gemini가 분야별로 중요한 기사를 골라 짧게 요약합니다."""
+    key = os.environ.get("GEMINI_API_KEY")
+    if not key:
+        raise RuntimeError("GEMINI_API_KEY 없음")
+
+    material = []
+    for i, (heading, items) in enumerate(collected):
+        material.append(f"## 분야 {i}: {heading}")
+        for j, (source, title, desc) in enumerate(items):
+            material.append(f"[{j}] ({source}) {title} — {desc}")
+    prompt = (
+        "너는 아침 뉴스 브리핑 편집자다. 아래 분야별 기사 목록에서, 분야마다 "
+        f"오늘 아침 꼭 알아야 할 중요한 기사 {NEWS_PER_SECTION}개를 골라라.\n"
+        "- 광고성·가벼운 화제·같은 사건의 중복 기사는 제외한다.\n"
+        "- 각 기사를 사실 위주로 한국어 1~2문장(90자 이내)으로 요약한다. 제목을 그대로 옮기지 말고 핵심 내용을 풀어 쓴다.\n"
+        "- 주어진 제목과 설명에 없는 내용은 추측해서 쓰지 않는다. 의견이나 평가는 덧붙이지 않는다.\n"
+        "- 출처는 목록에 적힌 그대로 쓴다.\n"
+        "- 분야에 기사가 없으면 items를 빈 배열로 둔다.\n"
+        'JSON으로만 답하라: {"sections":[{"index":0,"items":[{"summary":"...","source":"..."}]}]}\n\n'
+        + "\n".join(material)
+    )
+    body = json.dumps({
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"responseMimeType": "application/json", "temperature": 0.3},
+    }).encode("utf-8")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
+    req = urllib.request.Request(url, data=body, method="POST",
+                                 headers={"Content-Type": "application/json", "x-goog-api-key": key})
+    with urllib.request.urlopen(req, timeout=90) as resp:
+        data = json.loads(resp.read().decode("utf-8"))
+    text = data["candidates"][0]["content"]["parts"][0]["text"]
+    result = json.loads(text)
+
+    blocks = []
+    by_index = {s.get("index"): s.get("items", []) for s in result.get("sections", [])}
+    for i, (heading, _) in enumerate(collected):
         lines = [heading]
-        seen = set()
-        for source, title in picked:
-            if title in seen:
-                continue
-            seen.add(title)
-            lines.append(f"· {title} [{source}]")
-            if len(lines) > NEWS_PER_SECTION:
-                break
+        for it in by_index.get(i, [])[:NEWS_PER_SECTION]:
+            lines.append(f"· {it['summary']} [{it['source']}]")
         if len(lines) == 1:
             lines.append("· 가져오지 못했어요")
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks)
+
+
+def headlines_only(collected):
+    """AI 요약이 실패하면 제목만이라도 보여줍니다."""
+    blocks = []
+    for heading, items in collected:
+        lines = [heading] + [f"· {t} [{s}]" for s, t, _ in items[:NEWS_PER_SECTION]]
+        if len(lines) == 1:
+            lines.append("· 가져오지 못했어요")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
+def news_section():
+    collected = collect_news()
+    try:
+        return ai_summarize(collected)
+    except Exception as e:
+        return headlines_only(collected) + f"\n(AI 요약 실패: {type(e).__name__})"
 
 
 def gold_section():
