@@ -8,6 +8,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -73,14 +74,13 @@ def market_section():
     return "\n".join(lines)
 
 
-# 뉴스: 분야별로 위에서부터 시도하고, 다 안 되면 구글 뉴스 검색으로 대체
+# 뉴스: 분야별로 여러 언론사 기사를 모아 AI에게 넘깁니다.
+# MBC는 따로 네이버 뉴스의 'MBC 기사 목록'에서 가져와 AI가 분야를 나눠 우선 고릅니다.
 NEWS = [
     ("📰 정치", [
-        ("MBC", "https://imnews.imbc.com/rss/google_news/politics.rss"),
         ("JTBC", "https://news-ex.jtbc.co.kr/v1/get/rss/section/politics"),
     ], "정치"),
     ("💰 경제", [
-        ("MBC", "https://imnews.imbc.com/rss/google_news/economy.rss"),
         ("JTBC", "https://news-ex.jtbc.co.kr/v1/get/rss/section/economy"),
     ], "경제"),
     ("💻 IT", [
@@ -92,8 +92,14 @@ NEWS = [
         ("매일경제", "https://www.mk.co.kr/rss/50300009/"),
     ], "부동산 청약"),
 ]
+MBC_LIST_PAGES = [  # 네이버 뉴스의 MBC(언론사 번호 214) 기사 목록
+    "https://news.naver.com/main/list.naver?mode=LPOD&mid=sec&oid=214&listType=summary",
+    "https://media.naver.com/press/214",
+    "https://media.naver.com/press/214/ranking",
+]
+MBC_MAX = 30              # AI에게 넘길 MBC 기사 수
+PER_SOURCE = 8            # 언론사별로 AI에게 넘길 후보 기사 수
 NEWS_PER_SECTION = 3      # 분야별로 보여줄 기사 수
-NEWS_CANDIDATES = 12      # AI에게 넘겨줄 분야별 후보 기사 수
 # 먼저 시도할 모델 (안 되면 구글에서 지금 쓸 수 있는 flash 모델 목록을 받아 차례로 시도)
 GEMINI_PREFERRED = ["gemini-flash-latest", "gemini-flash-lite-latest"]
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36"}
@@ -135,6 +141,54 @@ def google_news(query):
     return results
 
 
+def get_html(url):
+    req = urllib.request.Request(url, headers={**UA, "Referer": "https://news.naver.com/"})
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        return resp.read().decode("utf-8", "replace")
+
+
+def naver_article(aid):
+    """네이버 뉴스 기사 페이지에서 (제목, 본문 앞부분)을 꺼냅니다."""
+    page = get_html(f"https://n.news.naver.com/mnews/article/214/{aid}")
+    def meta(prop):
+        m = re.search(rf'<meta[^>]+property="{prop}"[^>]+content="([^"]*)"', page)
+        return clean(m.group(1)) if m else ""
+    return meta("og:title"), meta("og:description")[:300]
+
+
+def collect_mbc():
+    """네이버 뉴스에서 MBC 최신 기사 [(MBC, 제목, 본문 앞부분), ...]"""
+    ids = []
+    for url in MBC_LIST_PAGES:
+        try:
+            page = get_html(url)
+        except Exception as e:
+            print(f"[MBC 목록] {url} 실패: {type(e).__name__}")
+            continue
+        found = re.findall(r"article/214/(\d{10})", page) + re.findall(r"oid=214&(?:amp;)?aid=(\d{10})", page)
+        for aid in found:
+            if aid not in ids:
+                ids.append(aid)
+        print(f"[MBC 목록] {url} {len(found)}건")
+        if len(ids) >= MBC_MAX:
+            break
+    ids = sorted(ids, reverse=True)[:MBC_MAX]  # 번호가 클수록 최신 기사
+    articles = []
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for aid, result in zip(ids, pool.map(lambda a: _safe(naver_article, a), ids)):
+            if result and result[0]:
+                articles.append(("MBC", result[0], result[1]))
+    print(f"[MBC 기사] {len(articles)}건")
+    return articles
+
+
+def _safe(func, *args):
+    try:
+        return func(*args)
+    except Exception:
+        return None
+
+
 def collect_news():
     """분야별 후보 기사 [(분야, [(출처, 제목, 설명), ...]), ...]"""
     collected = []
@@ -142,14 +196,18 @@ def collect_news():
         picked = []
         for source, url in feeds:
             try:
-                picked = [(source, t, d) for t, d in fetch_items(url)]
-            except Exception:
-                picked = []
-            if picked:
-                break
+                if url.startswith("gnews:"):
+                    got = [(source, t, d) for _, t, d in google_news(url[6:])]
+                else:
+                    got = [(source, t, d) for t, d in fetch_items(url)]
+            except Exception as e:
+                print(f"[뉴스 {heading} {source}] 실패: {type(e).__name__}")
+                got = []
+            print(f"[뉴스 {heading} {source}] {len(got)}건")
+            picked += got[:PER_SOURCE]
         if not picked:
             try:
-                picked = google_news(query)
+                picked = google_news(query)[:PER_SOURCE]
             except Exception:
                 picked = []
         seen, unique = set(), []
@@ -157,7 +215,7 @@ def collect_news():
             if item[1] not in seen:
                 seen.add(item[1])
                 unique.append(item)
-        collected.append((heading, unique[:NEWS_CANDIDATES]))
+        collected.append((heading, unique))
     return collected
 
 
@@ -182,13 +240,17 @@ def gemini_models(key):
     return models[:6]
 
 
-def ai_summarize(collected):
+def ai_summarize(collected, mbc):
     """Gemini가 분야별로 중요한 기사를 골라 짧게 요약합니다."""
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
         raise RuntimeError("GEMINI_API_KEY 없음")
 
     material = []
+    if mbc:
+        material.append("## MBC 최신 기사 (분야 구분 없음 — 알맞은 분야에 배치)")
+        for j, (source, title, desc) in enumerate(mbc):
+            material.append(f"[M{j}] ({source}) {title} — {desc}")
     for i, (heading, items) in enumerate(collected):
         material.append(f"## 분야 {i}: {heading}")
         for j, (source, title, desc) in enumerate(items):
@@ -196,11 +258,13 @@ def ai_summarize(collected):
     prompt = (
         "너는 아침 뉴스 브리핑 편집자다. 아래 분야별 기사 목록에서, 분야마다 "
         f"오늘 아침 꼭 알아야 할 중요한 기사 {NEWS_PER_SECTION}개를 골라라.\n"
+        "- MBC 최신 기사 목록에서 각 분야(정치·경제·IT·부동산)에 해당하는 중요한 기사가 있으면 그 분야에 MBC 기사를 우선으로 넣고, 부족하면 그 분야 목록의 다른 언론사 기사로 채운다. 한 기사는 한 분야에만 쓴다.\n"
         "- 광고성·가벼운 화제·같은 사건의 중복 기사는 제외한다.\n"
         "- 각 기사를 사실 위주로 한국어 1~2문장(90자 이내)으로 요약한다. 제목을 그대로 옮기지 말고 핵심 내용을 풀어 쓴다.\n"
         "- 주어진 제목과 설명에 없는 내용은 추측해서 쓰지 않는다. 의견이나 평가는 덧붙이지 않는다.\n"
         "- 출처는 목록에 적힌 그대로 쓴다.\n"
         "- 분야에 기사가 없으면 items를 빈 배열로 둔다.\n"
+        f"- sections에는 분야 0부터 {len(collected) - 1}까지 모든 분야를 빠짐없이 넣는다.\n"
         'JSON으로만 답하라: {"sections":[{"index":0,"items":[{"summary":"...","source":"..."}]}]}\n\n'
         + "\n".join(material)
     )
@@ -239,14 +303,19 @@ def ai_summarize(collected):
     text = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     result = json.loads(text)
 
+    sections = result.get("sections", [])
+    by_index = {s.get("index"): s.get("items", []) for s in sections}
     blocks = []
-    by_index = {s.get("index"): s.get("items", []) for s in result.get("sections", [])}
-    for i, (heading, _) in enumerate(collected):
+    for i, (heading, items) in enumerate(collected):
+        picked = by_index.get(i)
+        if picked is None and i < len(sections):
+            picked = sections[i].get("items", [])  # 번호가 빠졌으면 순서대로
         lines = [heading]
-        for it in by_index.get(i, [])[:NEWS_PER_SECTION]:
-            lines.append(f"· {it['summary']} [{it['source']}]")
-        if len(lines) == 1:
-            lines.append("· 가져오지 못했어요")
+        for it in (picked or [])[:NEWS_PER_SECTION]:
+            if it.get("summary"):
+                lines.append(f"· {it['summary']} [{it.get('source', '')}]")
+        if len(lines) == 1:  # AI가 이 분야를 빠뜨리면 제목이라도
+            lines += [f"· {t} [{s}]" for s, t, _ in items[:NEWS_PER_SECTION]] or ["· 가져오지 못했어요"]
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks)
 
@@ -264,10 +333,12 @@ def headlines_only(collected):
 
 def news_section():
     collected = collect_news()
+    mbc = collect_mbc()
+    note = "" if mbc else "\n(MBC 기사를 가져오지 못했어요)"
     try:
-        return ai_summarize(collected)
+        return ai_summarize(collected, mbc) + note
     except Exception as e:
-        return headlines_only(collected) + f"\n(AI 요약 실패: {e})"
+        return headlines_only(collected) + note + f"\n(AI 요약 실패: {e})"
 
 
 def gold_section():
