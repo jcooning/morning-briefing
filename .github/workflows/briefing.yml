@@ -26,6 +26,7 @@ jobs:
         run: python briefing.py
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          DATA_GO_KR_KEY: ${{ secrets.DATA_GO_KR_KEY }}
 
       - name: 브리핑 저장
         run: |
