@@ -492,6 +492,7 @@ NEW_DAYS = 7  # 상태가 비어 있어도 최근 7일 안에 올라온 공고�
 def lease_notices():
     """[(유형, 공고명, 공고일, 상태), ...] — 장기전세·행복주택만"""
     found, seen = [], set()
+    rows_read = 0
     today = datetime.now(KST).date()
     for url in SH_LEASE_PAGES:
         try:
@@ -503,6 +504,7 @@ def lease_notices():
             cells = [clean(c) for c in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
             if len(cells) < 6:
                 continue
+            rows_read += 1
             kind, title, posted, status = cells[1], cells[2], cells[3], cells[5]
             label = next((t for t in LEASE_TYPES if t in kind or t in title), None)
             if "미리내집" in title:
@@ -516,6 +518,9 @@ def lease_notices():
             if any(w in status for w in OPEN_WORDS) or (recent and "마감" not in status):
                 seen.add(title)
                 found.append((label, title, posted[:10], status or "공고"))
+    print(f"[청약 목록] 읽은 공고 {rows_read}건")
+    if rows_read == 0:
+        raise RuntimeError("공고 목록을 하나도 읽지 못함")  # '없음'과 '실패'를 구분
     return found
 
 
@@ -533,7 +538,10 @@ def apt_notices():
     url = "https://api.odcloud.kr/api/ApplyhomeInfoDetailSvc/v1/getAPTLttotPblancDetail?" + params
     req = urllib.request.Request(url, headers=UA)
     with urllib.request.urlopen(req, timeout=20) as resp:
-        rows = json.loads(resp.read().decode("utf-8")).get("data", [])
+        payload = json.loads(resp.read().decode("utf-8"))
+    if "data" not in payload:
+        raise RuntimeError(str(payload)[:200])
+    rows = payload["data"]
     result = []
     for r in rows:
         end = r.get("RCEPT_ENDDE") or ""
