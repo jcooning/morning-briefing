@@ -490,44 +490,57 @@ def news_section():
 
 
 # ---------------- 서울 청약 ----------------
-# 장기전세·행복주택: 서울주거포털의 SH/LH 임대 공고 목록
-SH_LEASE_PAGES = ["https://housing.seoul.go.kr/site/main/sh/publicLease/list"] + [
-    f"https://housing.seoul.go.kr/site/main/sh/publicLease/{n:02d}/list" for n in range(1, 13)
-] + ["https://housing.seoul.go.kr/site/main/lh/publicLease/list"]
+# 장기전세·행복주택: 서울주거포털(housing.seoul.go.kr)의 SH·LH 임대 공고 목록
+PORTAL = "https://housing.seoul.go.kr/site/main"
+LEASE_PAGES = [
+    f"{PORTAL}/sh/publicLease/03/list",   # SH 장기전세주택 (미리내집 포함)
+    f"{PORTAL}/sh/publicLease/07/list",   # SH 행복주택
+    f"{PORTAL}/sh/publicLease/list",      # SH 전체 최신
+    f"{PORTAL}/lh/publicLease/list?cp=1&supplyType=publicLease&cnpCdNm=" + urllib.parse.quote("서울특별시") + "&aisTpCd=10",  # LH 서울 행복주택
+    f"{PORTAL}/lh/publicLease/list?cp=1&supplyType=publicLease&cnpCdNm=" + urllib.parse.quote("서울특별시") + "&aisTpCd=42",  # LH 서울 신혼희망 행복주택
+]
 LEASE_TYPES = ["장기전세", "행복주택"]
-OPEN_WORDS = ("모집중", "접수중", "모집예정", "접수예정", "공고중")
-NEW_DAYS = 7  # 상태가 비어 있어도 최근 7일 안에 올라온 공고는 보여줌
+OPEN_WORDS = ("모집중", "접수중", "모집예정", "접수예정", "공고중", "상담요청")
+
+
+def find_col(headers, *names):
+    for i, h in enumerate(headers):
+        if any(n in h for n in names):
+            return i
+    return None
 
 
 def lease_notices():
-    """[(유형, 공고명, 공고일, 상태), ...] — 장기전세·행복주택만"""
+    """[(유형, 공고명, 공고일, 마감일, 상태), ...] — 모집 중인 장기전세·행복주택"""
     found, seen = [], set()
     rows_read = 0
-    today = datetime.now(KST).date()
-    for url in SH_LEASE_PAGES:
+    for url in LEASE_PAGES:
         try:
             page = get_html(url)
         except Exception as e:
             print(f"[청약 목록] {url} 실패: {type(e).__name__}")
             continue
+        headers = [clean(h) for h in re.findall(r"<th[^>]*>(.*?)</th>", page, re.S)]
+        c_kind = find_col(headers, "유형")
+        c_title = find_col(headers, "공고명")
+        c_posted = find_col(headers, "게시일", "공고일")
+        c_end = find_col(headers, "마감일")
+        c_status = find_col(headers, "상태")
+        if None in (c_kind, c_title, c_posted, c_status):
+            print(f"[청약 목록] {url} 표 머리글을 못 찾음: {headers}")
+            continue
         for row in re.findall(r"<tr[^>]*>(.*?)</tr>", page, re.S):
             cells = [clean(c) for c in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
-            if len(cells) < 6:
+            if len(cells) <= max(c_kind, c_title, c_posted, c_status):
                 continue
             rows_read += 1
-            kind, title, posted, status = cells[1], cells[2], cells[3], cells[5]
-            label = next((t for t in LEASE_TYPES if t in kind or t in title), None)
-            if "미리내집" in title:
-                label = "장기전세"
-            if not label or title in seen:
+            kind, title, status = cells[c_kind], cells[c_title], cells[c_status]
+            label = next((t for t in LEASE_TYPES if t in kind), None)
+            if not label or title in seen or not any(w in status for w in OPEN_WORDS):
                 continue
-            try:
-                recent = (today - datetime.strptime(posted[:10], "%Y-%m-%d").date()).days <= NEW_DAYS
-            except ValueError:
-                recent = False
-            if any(w in status for w in OPEN_WORDS) or (recent and "마감" not in status):
-                seen.add(title)
-                found.append((label, title, posted[:10], status or "공고"))
+            seen.add(title)
+            end = cells[c_end] if c_end is not None and c_end < len(cells) else ""
+            found.append((label, title, cells[c_posted][:10], end[:10], status))
     print(f"[청약 목록] 읽은 공고 {rows_read}건")
     if rows_read == 0:
         raise RuntimeError("공고 목록을 하나도 읽지 못함")  # '없음'과 '실패'를 구분
@@ -588,8 +601,9 @@ def cheongyak_section():
         leases = lease_notices()
         for label in LEASE_TYPES:
             mine = [x for x in leases if x[0] == label]
-            for _, title, posted, status in mine[:3]:
-                lines.append(f"[{label}] {title} · 공고 {short_date(posted)} · {status}")
+            for _, title, posted, end, status in mine[:3]:
+                until = f" · ~{short_date(end)} 마감" if end else ""
+                lines.append(f"[{label}] {title} · 공고 {short_date(posted)}{until} · {status}")
             if not mine:
                 lines.append(f"[{label}] 모집 중인 공고 없음")
     except Exception as e:
