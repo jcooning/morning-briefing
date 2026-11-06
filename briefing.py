@@ -3,6 +3,7 @@ import html
 import json
 import os
 import re
+import urllib.error
 import urllib.parse
 import urllib.request
 import xml.etree.ElementTree as ET
@@ -96,7 +97,8 @@ NEWS = [
 ]
 NEWS_PER_SECTION = 3      # 분야별로 보여줄 기사 수
 NEWS_CANDIDATES = 12      # AI에게 넘겨줄 분야별 후보 기사 수
-GEMINI_MODEL = "gemini-flash-latest"
+# 위에서부터 차례로 시도 (하나가 막히면 다음 모델로)
+GEMINI_MODELS = ["gemini-2.5-flash", "gemini-flash-latest", "gemini-2.0-flash", "gemini-2.5-flash-lite"]
 UA = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130 Safari/537.36"}
 
 
@@ -188,12 +190,27 @@ def ai_summarize(collected):
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"responseMimeType": "application/json", "temperature": 0.3},
     }).encode("utf-8")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    req = urllib.request.Request(url, data=body, method="POST",
-                                 headers={"Content-Type": "application/json", "x-goog-api-key": key})
-    with urllib.request.urlopen(req, timeout=90) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    text = data["candidates"][0]["content"]["parts"][0]["text"]
+    errors = []
+    text = None
+    for model in GEMINI_MODELS:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        req = urllib.request.Request(url, data=body, method="POST",
+                                     headers={"Content-Type": "application/json", "x-goog-api-key": key})
+        try:
+            with urllib.request.urlopen(req, timeout=90) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            text = data["candidates"][0]["content"]["parts"][0]["text"]
+            break
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")[:500]
+            print(f"[Gemini {model}] HTTP {e.code}: {detail}")  # Actions 로그에서 확인용
+            errors.append(f"{model} {e.code}")
+        except Exception as e:
+            print(f"[Gemini {model}] {type(e).__name__}: {e}")
+            errors.append(f"{model} {type(e).__name__}")
+    if text is None:
+        raise RuntimeError(", ".join(errors))
+    text = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
     result = json.loads(text)
 
     blocks = []
@@ -224,7 +241,7 @@ def news_section():
     try:
         return ai_summarize(collected)
     except Exception as e:
-        return headlines_only(collected) + f"\n(AI 요약 실패: {type(e).__name__})"
+        return headlines_only(collected) + f"\n(AI 요약 실패: {e})"
 
 
 def gold_section():
