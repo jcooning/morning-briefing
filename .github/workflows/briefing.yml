@@ -24,6 +24,8 @@ jobs:
 
       - name: 브리핑 만들기
         run: python briefing.py
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
 
       - name: 브리핑 저장
         run: |
