@@ -29,12 +29,22 @@ MARKET = [
     ("엔화(100엔)", "JPYKRW=X", "fx100"),
     ("비트코인", "BTC-KRW", "krw"),
 ]
-STOCKS = [
+KR_STOCKS = [  # 국내 관심종목
     ("SK하이닉스", "000660.KS", "krw"),
     ("삼성전자", "005930.KS", "krw"),
+    ("LG전자", "066570.KS", "krw"),
+    ("하이브", "352820.KS", "krw"),
+]
+US_STOCKS = [  # 미국 관심종목
     ("구글", "GOOGL", "usd"),
     ("애플", "AAPL", "usd"),
+    ("엔비디아", "NVDA", "usd"),
+    ("메타", "META", "usd"),
+    ("TSMC", "TSM", "usd"),
+    ("스페이스X", "SPCX", "usd"),
+    ("팔란티어", "PLTR", "usd"),
 ]
+STOCKS = KR_STOCKS + US_STOCKS
 
 
 def fmt_price(value, unit):
@@ -196,8 +206,8 @@ def market_section():
 
     lines = ["📈 증시"]
     for i, (name, code, unit) in enumerate(items):
-        if i in (4, 7, len(MARKET)):
-            lines.append("")  # 지수 / 환율 / 코인 / 종목 사이 빈 줄
+        if i in (4, 7, len(MARKET), len(MARKET) + len(KR_STOCKS)):
+            lines.append("")  # 지수 / 환율 / 코인 / 국내 종목 / 미국 종목 사이 빈 줄
         if i == 4:
             lines.append(rates_line(closes))  # 금리는 달러 위에
         try:
@@ -370,277 +380,3 @@ def gemini_models(key):
             if ("flash" in name and "generateContent" in m.get("supportedGenerationMethods", [])
                     and not any(x in name for x in ("image", "tts", "live", "audio", "embed", "preview", "exp"))):
                 found.append(name)
-        found.sort(reverse=True)  # 숫자가 큰(최신) 모델부터
-        models += [n for n in found if n not in models]
-    except Exception as e:
-        print(f"[Gemini 모델 목록 실패] {e}")
-    return models[:6]
-
-
-def ai_summarize(collected, mbc):
-    """Gemini가 분야별로 중요한 기사를 골라 짧게 요약합니다."""
-    key = os.environ.get("GEMINI_API_KEY")
-    if not key:
-        raise RuntimeError("GEMINI_API_KEY 없음")
-
-    material = []
-    if mbc:
-        material.append("## MBC 최신 기사 (분야 구분 없음 — 알맞은 분야에 배치)")
-        for j, (source, title, desc) in enumerate(mbc):
-            material.append(f"[M{j}] ({source}) {title} — {desc}")
-    for i, (heading, items) in enumerate(collected):
-        material.append(f"## 분야 {i}: {heading}")
-        for j, (source, title, desc) in enumerate(items):
-            material.append(f"[{j}] ({source}) {title} — {desc}")
-    prompt = (
-        "너는 아침 뉴스 브리핑 편집자다. 아래 분야별 기사 목록에서, 분야마다 "
-        f"오늘 아침 꼭 알아야 할 중요한 기사 {NEWS_PER_SECTION}개를 골라라.\n"
-        "- MBC 최신 기사 목록은 정치·경제·부동산 분야에만 쓴다. 해당 분야의 중요한 MBC 기사가 있으면 우선으로 넣고, 부족하면 그 분야 목록의 다른 언론사 기사로 채운다. IT 분야는 IT 목록에서만 고른다. 한 기사는 한 분야에만 쓴다.\n"
-        "- 분야 기준을 엄격히 지킨다. 정치=국회·정당·대통령·정부 인사·외교·북한. 경제=증시·금리·환율·물가·기업 실적·산업·무역. 부동산=집값·청약·재건축·부동산 정책과 대출 규제. IT=AI·반도체·통신·플랫폼·과학기술. 사건사고·연예·스포츠·날씨는 어느 분야에도 넣지 않는다.\n"
-        "- 광고성·가벼운 화제·같은 사건의 중복 기사는 제외한다.\n"
-        "- 각 기사를 사실 위주로 한국어 1~2문장(90자 이내)으로 요약한다. 제목을 그대로 옮기지 말고 핵심 내용을 풀어 쓴다.\n"
-        "- 주어진 제목과 설명에 없는 내용은 추측해서 쓰지 않는다. 의견이나 평가는 덧붙이지 않는다.\n"
-        "- 출처는 목록에 적힌 그대로 쓴다.\n"
-        "- 분야에 기사가 없으면 items를 빈 배열로 둔다.\n"
-        f"- sections에는 분야 0부터 {len(collected) - 1}까지 모든 분야를 빠짐없이 넣는다.\n"
-        'JSON으로만 답하라: {"sections":[{"index":0,"items":[{"summary":"...","source":"..."}]}]}\n\n'
-        + "\n".join(material)
-    )
-    body = json.dumps({
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {"responseMimeType": "application/json", "temperature": 0.3},
-    }).encode("utf-8")
-    errors = []
-    text = None
-    for model in gemini_models(key):
-        for attempt in range(3):  # 503(사용량 몰림)이면 잠깐 쉬었다가 재시도
-            url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-            req = urllib.request.Request(url, data=body, method="POST",
-                                         headers={"Content-Type": "application/json", "x-goog-api-key": key})
-            try:
-                with urllib.request.urlopen(req, timeout=90) as resp:
-                    data = json.loads(resp.read().decode("utf-8"))
-                text = data["candidates"][0]["content"]["parts"][0]["text"]
-                break
-            except urllib.error.HTTPError as e:
-                detail = e.read().decode("utf-8", "replace")[:300]
-                print(f"[Gemini {model}] HTTP {e.code}: {detail}")  # Actions 로그에서 확인용
-                if e.code in (500, 503) and attempt < 2:
-                    time.sleep(15)
-                    continue
-                errors.append(f"{model} {e.code}")
-                break
-            except Exception as e:
-                print(f"[Gemini {model}] {type(e).__name__}: {e}")
-                errors.append(f"{model} {type(e).__name__}")
-                break
-        if text is not None:
-            break
-    if text is None:
-        raise RuntimeError(", ".join(errors))
-    text = text.strip().removeprefix("```json").removeprefix("```").removesuffix("```").strip()
-    result = json.loads(text)
-
-    sections = result.get("sections", [])
-    by_index = {s.get("index"): s.get("items", []) for s in sections}
-    blocks = []
-    for i, (heading, items) in enumerate(collected):
-        picked = by_index.get(i)
-        if picked is None and i < len(sections):
-            picked = sections[i].get("items", [])  # 번호가 빠졌으면 순서대로
-        lines = [heading]
-        for it in (picked or [])[:NEWS_PER_SECTION]:
-            if it.get("summary"):
-                lines.append(f"· {it['summary']}")
-        if len(lines) == 1:  # AI가 이 분야를 빠뜨리면 제목이라도
-            lines += [f"· {t}" for s, t, _ in items[:NEWS_PER_SECTION]] or ["· 가져오지 못했어요"]
-        blocks.append("\n".join(lines))
-    return "\n\n".join(blocks)
-
-
-def headlines_only(collected):
-    """AI 요약이 실패하면 제목만이라도 보여줍니다."""
-    blocks = []
-    for heading, items in collected:
-        lines = [heading] + [f"· {t}" for s, t, _ in items[:NEWS_PER_SECTION]]
-        if len(lines) == 1:
-            lines.append("· 가져오지 못했어요")
-        blocks.append("\n".join(lines))
-    return "\n\n".join(blocks)
-
-
-def news_section():
-    collected = collect_news()
-    mbc = collect_mbc()
-    note = "" if mbc else "\n(MBC 기사를 가져오지 못했어요)"
-    try:
-        return ai_summarize(collected, mbc) + note
-    except Exception as e:
-        return headlines_only(collected) + note + f"\n(AI 요약 실패: {e})"
-
-
-# ---------------- 서울 청약 ----------------
-# 장기전세·행복주택: 서울주거포털의 SH/LH 임대 공고 목록
-SH_LEASE_PAGES = ["https://housing.seoul.go.kr/site/main/sh/publicLease/list"] + [
-    f"https://housing.seoul.go.kr/site/main/sh/publicLease/{n:02d}/list" for n in range(1, 13)
-] + ["https://housing.seoul.go.kr/site/main/lh/publicLease/list"]
-LEASE_TYPES = ["장기전세", "행복주택"]
-OPEN_WORDS = ("모집중", "접수중", "모집예정", "접수예정", "공고중")
-NEW_DAYS = 7  # 상태가 비어 있어도 최근 7일 안에 올라온 공고는 보여줌
-
-
-def lease_notices():
-    """[(유형, 공고명, 공고일, 상태), ...] — 장기전세·행복주택만"""
-    found, seen = [], set()
-    rows_read = 0
-    today = datetime.now(KST).date()
-    for url in SH_LEASE_PAGES:
-        try:
-            page = get_html(url)
-        except Exception as e:
-            print(f"[청약 목록] {url} 실패: {type(e).__name__}")
-            continue
-        for row in re.findall(r"<tr[^>]*>(.*?)</tr>", page, re.S):
-            cells = [clean(c) for c in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
-            if len(cells) < 6:
-                continue
-            rows_read += 1
-            kind, title, posted, status = cells[1], cells[2], cells[3], cells[5]
-            label = next((t for t in LEASE_TYPES if t in kind or t in title), None)
-            if "미리내집" in title:
-                label = "장기전세"
-            if not label or title in seen:
-                continue
-            try:
-                recent = (today - datetime.strptime(posted[:10], "%Y-%m-%d").date()).days <= NEW_DAYS
-            except ValueError:
-                recent = False
-            if any(w in status for w in OPEN_WORDS) or (recent and "마감" not in status):
-                seen.add(title)
-                found.append((label, title, posted[:10], status or "공고"))
-    print(f"[청약 목록] 읽은 공고 {rows_read}건")
-    if rows_read == 0:
-        raise RuntimeError("공고 목록을 하나도 읽지 못함")  # '없음'과 '실패'를 구분
-    return found
-
-
-def apt_notices():
-    """청약홈(공공데이터포털) — 서울 아파트 일반 분양 중 접수가 안 끝난 것"""
-    key = os.environ.get("DATA_GO_KR_KEY")
-    if not key:
-        return None
-    today = datetime.now(KST).date()
-    params = urllib.parse.urlencode({
-        "page": 1, "perPage": 50, "serviceKey": key,
-        "cond[SUBSCRPT_AREA_CODE_NM::EQ]": "서울",
-        "cond[RCRIT_PBLANC_DE::GTE]": (today - timedelta(days=60)).isoformat(),
-    })
-    url = "https://api.odcloud.kr/api/ApplyhomeInfoDetailSvc/v1/getAPTLttotPblancDetail?" + params
-    req = urllib.request.Request(url, headers=UA)
-    with urllib.request.urlopen(req, timeout=20) as resp:
-        payload = json.loads(resp.read().decode("utf-8"))
-    if "data" not in payload:
-        raise RuntimeError(str(payload)[:200])
-    rows = payload["data"]
-    result = []
-    for r in rows:
-        end = r.get("RCEPT_ENDDE") or ""
-        if end and end < today.isoformat():
-            continue
-        result.append((r.get("RCEPT_BGNDE") or "", r.get("HOUSE_NM", ""), end, r.get("TOT_SUPLY_HSHLDCO")))
-    return sorted(result)
-
-
-def short_date(iso):
-    try:
-        d = datetime.strptime(iso[:10], "%Y-%m-%d")
-        return f"{d.month}/{d.day}"
-    except ValueError:
-        return iso
-
-
-def cheongyak_section():
-    lines = ["🏢 서울 청약"]
-    try:
-        apts = apt_notices()
-        if apts is None:
-            pass  # 키가 없으면 일반 분양은 건너뜀
-        elif apts:
-            for start, name, end, units in apts[:5]:
-                unit = f" · {units}세대" if units else ""
-                lines.append(f"[일반] {name} · 접수 {short_date(start)}~{short_date(end)}{unit}")
-        else:
-            lines.append("[일반] 접수 예정·진행 중인 단지 없음")
-    except Exception as e:
-        print(f"[청약 일반] 실패: {e}")
-        lines.append("[일반] 조회 실패")
-    try:
-        leases = lease_notices()
-        for label in LEASE_TYPES:
-            mine = [x for x in leases if x[0] == label]
-            for _, title, posted, status in mine[:3]:
-                lines.append(f"[{label}] {title} · 공고 {short_date(posted)} · {status}")
-            if not mine:
-                lines.append(f"[{label}] 모집 중인 공고 없음")
-    except Exception as e:
-        print(f"[청약 임대] 실패: {e}")
-        lines.append("[장기전세·행복주택] 조회 실패")
-    return "\n".join(lines)
-
-
-def gold_section():
-    """국제 금 시세 (뉴욕 금 선물, 달러/온스)"""
-    series = yf.download(["GC=F"], period="10d", progress=False, auto_adjust=False)["Close"]["GC=F"].dropna()
-    last, prev = float(series.iloc[-1]), float(series.iloc[-2])
-    return f"🥇 금시세\n국제 금 ${last:,.2f}/oz ({fmt_change(last, prev)})"
-
-
-def main():
-    now = datetime.now(KST)
-    header = f"☀ {now.month}/{now.day}({WEEKDAYS[now.weekday()]}) 아침 브리핑"
-    try:
-        days = get_weather()
-    except Exception as e:
-        print(f"[날씨] 실패: {e}")
-        days = None
-
-    # briefing.txt — 제목·날씨·증시·뉴스·청약·국제 금 (이 뒤에 아이폰이 순금 시세를 붙임)
-    top = header + "\n" + (today_weather(days) if days else "날씨 조회 실패")
-    sections = [top]
-    try:
-        sections.append(market_section())
-    except Exception as e:
-        sections.append(f"📈 증시\n조회 실패 ({type(e).__name__})")
-    try:
-        sections.append(news_section())
-    except Exception as e:
-        sections.append(f"📰 뉴스\n조회 실패 ({type(e).__name__})")
-    try:
-        sections.append(cheongyak_section())
-    except Exception as e:
-        sections.append(f"🏢 서울 청약\n조회 실패 ({type(e).__name__})")
-    try:
-        sections.append(gold_section())
-    except Exception as e:
-        sections.append(f"🥇 금시세\n국제 금 조회 실패 ({type(e).__name__})")
-    with open("briefing.txt", "w", encoding="utf-8") as f:
-        f.write("\n\n".join(sections) + "\n")
-
-    # briefing2.txt — (금요일) 주말 날씨 + 오늘의 말씀 (메시지 맨 아래)
-    bottom = []
-    if now.weekday() == 4 and days:
-        bottom.append(weekend_weather(days))
-    try:
-        bottom.append(bible_section())
-    except Exception as e:
-        print(f"[성경] 실패: {e}")
-    with open("briefing2.txt", "w", encoding="utf-8") as f:
-        f.write("\n\n".join(bottom) + "\n")
-
-    print("\n\n".join(sections))
-    print("=" * 20)
-    print("\n\n".join(bottom))
-
-
-if __name__ == "__main__":
-    main()
