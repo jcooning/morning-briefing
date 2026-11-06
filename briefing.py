@@ -186,7 +186,7 @@ def bible_section():
     req = urllib.request.Request(f"https://bolls.life/get-verse/KRV/{book}/{chapter}/{verse}/", headers=UA)
     with urllib.request.urlopen(req, timeout=15) as resp:
         text = clean(json.loads(resp.read().decode("utf-8"))["text"])
-    return f"📖 오늘의 말씀\n{text}\n— {name} {chapter}:{verse} (개역한글)"
+    return f"📖 오늘의 말씀\n{text}\n— {name} {chapter}:{verse}"
 
 
 def market_section():
@@ -451,9 +451,9 @@ def ai_summarize(collected, mbc):
         lines = [heading]
         for it in (picked or [])[:NEWS_PER_SECTION]:
             if it.get("summary"):
-                lines.append(f"· {it['summary']} [{it.get('source', '')}]")
+                lines.append(f"· {it['summary']}")
         if len(lines) == 1:  # AI가 이 분야를 빠뜨리면 제목이라도
-            lines += [f"· {t} [{s}]" for s, t, _ in items[:NEWS_PER_SECTION]] or ["· 가져오지 못했어요"]
+            lines += [f"· {t}" for s, t, _ in items[:NEWS_PER_SECTION]] or ["· 가져오지 못했어요"]
         blocks.append("\n".join(lines))
     return "\n\n".join(blocks)
 
@@ -462,7 +462,7 @@ def headlines_only(collected):
     """AI 요약이 실패하면 제목만이라도 보여줍니다."""
     blocks = []
     for heading, items in collected:
-        lines = [heading] + [f"· {t} [{s}]" for s, t, _ in items[:NEWS_PER_SECTION]]
+        lines = [heading] + [f"· {t}" for s, t, _ in items[:NEWS_PER_SECTION]]
         if len(lines) == 1:
             lines.append("· 가져오지 못했어요")
         blocks.append("\n".join(lines))
@@ -477,6 +477,107 @@ def news_section():
         return ai_summarize(collected, mbc) + note
     except Exception as e:
         return headlines_only(collected) + note + f"\n(AI 요약 실패: {e})"
+
+
+# ---------------- 서울 청약 ----------------
+# 장기전세·행복주택: 서울주거포털의 SH/LH 임대 공고 목록
+SH_LEASE_PAGES = ["https://housing.seoul.go.kr/site/main/sh/publicLease/list"] + [
+    f"https://housing.seoul.go.kr/site/main/sh/publicLease/{n:02d}/list" for n in range(1, 13)
+] + ["https://housing.seoul.go.kr/site/main/lh/publicLease/list"]
+LEASE_TYPES = ["장기전세", "행복주택"]
+OPEN_WORDS = ("모집중", "접수중", "모집예정", "접수예정", "공고중")
+NEW_DAYS = 7  # 상태가 비어 있어도 최근 7일 안에 올라온 공고는 보여줌
+
+
+def lease_notices():
+    """[(유형, 공고명, 공고일, 상태), ...] — 장기전세·행복주택만"""
+    found, seen = [], set()
+    today = datetime.now(KST).date()
+    for url in SH_LEASE_PAGES:
+        try:
+            page = get_html(url)
+        except Exception as e:
+            print(f"[청약 목록] {url} 실패: {type(e).__name__}")
+            continue
+        for row in re.findall(r"<tr[^>]*>(.*?)</tr>", page, re.S):
+            cells = [clean(c) for c in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)]
+            if len(cells) < 6:
+                continue
+            kind, title, posted, status = cells[1], cells[2], cells[3], cells[5]
+            label = next((t for t in LEASE_TYPES if t in kind or t in title), None)
+            if "미리내집" in title:
+                label = "장기전세"
+            if not label or title in seen:
+                continue
+            try:
+                recent = (today - datetime.strptime(posted[:10], "%Y-%m-%d").date()).days <= NEW_DAYS
+            except ValueError:
+                recent = False
+            if any(w in status for w in OPEN_WORDS) or (recent and "마감" not in status):
+                seen.add(title)
+                found.append((label, title, posted[:10], status or "공고"))
+    return found
+
+
+def apt_notices():
+    """청약홈(공공데이터포털) — 서울 아파트 일반 분양 중 접수가 안 끝난 것"""
+    key = os.environ.get("DATA_GO_KR_KEY")
+    if not key:
+        return None
+    today = datetime.now(KST).date()
+    params = urllib.parse.urlencode({
+        "page": 1, "perPage": 50, "serviceKey": key,
+        "cond[SUBSCRPT_AREA_CODE_NM::EQ]": "서울",
+        "cond[RCRIT_PBLANC_DE::GTE]": (today - timedelta(days=60)).isoformat(),
+    })
+    url = "https://api.odcloud.kr/api/ApplyhomeInfoDetailSvc/v1/getAPTLttotPblancDetail?" + params
+    req = urllib.request.Request(url, headers=UA)
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        rows = json.loads(resp.read().decode("utf-8")).get("data", [])
+    result = []
+    for r in rows:
+        end = r.get("RCEPT_ENDDE") or ""
+        if end and end < today.isoformat():
+            continue
+        result.append((r.get("RCEPT_BGNDE") or "", r.get("HOUSE_NM", ""), end, r.get("TOT_SUPLY_HSHLDCO")))
+    return sorted(result)
+
+
+def short_date(iso):
+    try:
+        d = datetime.strptime(iso[:10], "%Y-%m-%d")
+        return f"{d.month}/{d.day}"
+    except ValueError:
+        return iso
+
+
+def cheongyak_section():
+    lines = ["🏢 서울 청약"]
+    try:
+        apts = apt_notices()
+        if apts is None:
+            pass  # 키가 없으면 일반 분양은 건너뜀
+        elif apts:
+            for start, name, end, units in apts[:5]:
+                unit = f" · {units}세대" if units else ""
+                lines.append(f"[일반] {name} · 접수 {short_date(start)}~{short_date(end)}{unit}")
+        else:
+            lines.append("[일반] 접수 예정·진행 중인 단지 없음")
+    except Exception as e:
+        print(f"[청약 일반] 실패: {e}")
+        lines.append("[일반] 조회 실패")
+    try:
+        leases = lease_notices()
+        for label in LEASE_TYPES:
+            mine = [x for x in leases if x[0] == label]
+            for _, title, posted, status in mine[:3]:
+                lines.append(f"[{label}] {title} · 공고 {short_date(posted)} · {status}")
+            if not mine:
+                lines.append(f"[{label}] 모집 중인 공고 없음")
+    except Exception as e:
+        print(f"[청약 임대] 실패: {e}")
+        lines.append("[장기전세·행복주택] 조회 실패")
+    return "\n".join(lines)
 
 
 def gold_section():
@@ -495,7 +596,7 @@ def main():
         print(f"[날씨] 실패: {e}")
         days = None
 
-    # briefing.txt — 제목·날씨·증시·뉴스·국제 금 (이 뒤에 아이폰이 순금 시세를 붙임)
+    # briefing.txt — 제목·날씨·증시·뉴스·청약·국제 금 (이 뒤에 아이폰이 순금 시세를 붙임)
     top = header + "\n" + (today_weather(days) if days else "날씨 조회 실패")
     sections = [top]
     try:
@@ -506,6 +607,10 @@ def main():
         sections.append(news_section())
     except Exception as e:
         sections.append(f"📰 뉴스\n조회 실패 ({type(e).__name__})")
+    try:
+        sections.append(cheongyak_section())
+    except Exception as e:
+        sections.append(f"🏢 서울 청약\n조회 실패 ({type(e).__name__})")
     try:
         sections.append(gold_section())
     except Exception as e:
