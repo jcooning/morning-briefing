@@ -204,6 +204,13 @@ def market_section():
     codes = [code for _, code, _ in items] + ["^TNX"]  # ^TNX = 미국 10년 국채금리
     closes = yf.download(codes, period="10d", progress=False, auto_adjust=False)["Close"]
 
+    # 같은 시장(한국/미국 주식)끼리 가장 최근 거래일을 구해 두고, 그보다 오래된 값이면 다시 받아옴
+    def latest_day(group):
+        days = [closes[c].dropna().index[-1].date() for _, c, _ in group
+                if c in closes and len(closes[c].dropna())]
+        return max(days) if days else None
+    newest = {"kr": latest_day(KR_STOCKS), "us": latest_day(US_STOCKS)}
+
     lines = ["📈 증시"]
     for i, (name, code, unit) in enumerate(items):
         if i in (4, 7, len(MARKET), len(MARKET) + len(KR_STOCKS)):
@@ -212,8 +219,15 @@ def market_section():
             lines.append(rates_line(closes))  # 금리는 달러 위에
         try:
             series = closes[code].dropna() if code in closes else None
-            if series is None or len(series) < 2:
-                series = yf.Ticker(code).history(period="10d")["Close"].dropna()  # 재시도
+            group = "kr" if (name, code, unit) in KR_STOCKS else "us" if (name, code, unit) in US_STOCKS else None
+            stale = (series is not None and len(series) and group and newest[group]
+                     and series.index[-1].date() < newest[group])
+            if series is None or len(series) < 2 or stale:
+                retry = yf.Ticker(code).history(period="10d")["Close"].dropna()  # 재시도
+                if len(retry) >= 2:
+                    series = retry
+                if stale:
+                    print(f"[증시] {name} 최신값 누락 → 재조회 (마지막 {series.index[-1].date()})")
             last, prev = float(series.iloc[-1]), float(series.iloc[-2])
             lines.append(f"{name} {fmt_price(last, unit)} ({fmt_change(last, prev)})")
         except Exception:
