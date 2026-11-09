@@ -66,7 +66,7 @@ def fmt_change(last, prev):
 
 
 # ---------------- 날씨 (Open-Meteo, 서울) ----------------
-WEATHER_URL = ("https://api.open-meteo.com/v1/forecast?latitude=37.5665&longitude=126.978"
+WEATHER_URL = ("https://api.open-meteo.com/v1/forecast?latitude=37.5446&longitude=127.0557"
                "&daily=weather_code,temperature_2m_max,temperature_2m_min,precipitation_probability_max"
                "&timezone=Asia%2FSeoul&forecast_days=4")
 WEATHER_CODES = [  # (코드 상한, 이모지, 상태)
@@ -83,9 +83,9 @@ def weather_desc(code):
     return "🌡", "-"
 
 
-# 기상청 단기예보 (공공데이터포털) — 서울 중구 격자
+# 기상청 단기예보 (공공데이터포털) — 성수동 격자
 KMA_URL = "https://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst"
-KMA_NX, KMA_NY = 60, 127
+KMA_NX, KMA_NY = 61, 127  # 서울 성동구 성수동
 KMA_SKY = {"1": ("☀️", "맑음"), "3": ("⛅", "구름 많음"), "4": ("☁️", "흐림")}
 KMA_PTY = {"1": ("🌧", "비"), "2": ("🌨", "비/눈"), "3": ("❄️", "눈"), "4": ("🌦", "소나기")}
 
@@ -172,11 +172,11 @@ def weather_line(day):
 
 
 def today_weather(days):
-    return "서울 " + weather_line(days[0])
+    return "성수동 " + weather_line(days[0])
 
 
 def weekend_weather(days):
-    lines = ["🗓 주말 날씨 (서울)"]
+    lines = ["🗓 주말 날씨 (성수동)"]
     for day in days[1:3]:  # 금요일 기준 토·일
         lines.append(f"{day['date'].month}/{day['date'].day}({WEEKDAYS[day['date'].weekday()]}) {weather_line(day)}")
     return "\n".join(lines)
