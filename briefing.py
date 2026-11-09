@@ -83,7 +83,76 @@ def weather_desc(code):
     return "🌡", "-"
 
 
+# 기상청 단기예보 (공공데이터포털) — 서울 중구 격자
+KMA_URL = "https://apis.data.go.kr/1360000/VilageFcstInfoService_2.0/getVilageFcst"
+KMA_NX, KMA_NY = 60, 127
+KMA_SKY = {"1": ("☀️", "맑음"), "3": ("⛅", "구름 많음"), "4": ("☁️", "흐림")}
+KMA_PTY = {"1": ("🌧", "비"), "2": ("🌨", "비/눈"), "3": ("❄️", "눈"), "4": ("🌦", "소나기")}
+
+
+def get_weather_kma():
+    """기상청 단기예보로 오늘~모레 날씨 [{date, emoji, text, max, min, rain}, ...]"""
+    key = os.environ.get("DATA_GO_KR_KEY")
+    if not key:
+        raise RuntimeError("DATA_GO_KR_KEY 없음")
+    now = datetime.now(KST)
+    base = now if now.hour * 60 + now.minute >= 2 * 60 + 15 else now - timedelta(days=1)
+    base_time = "0200" if base.date() == now.date() else "2300"
+    params = urllib.parse.urlencode({
+        "serviceKey": key, "pageNo": 1, "numOfRows": 1500, "dataType": "JSON",
+        "base_date": base.strftime("%Y%m%d"), "base_time": base_time, "nx": KMA_NX, "ny": KMA_NY,
+    })
+    req = urllib.request.Request(f"{KMA_URL}?{params}", headers=UA)
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        raw = resp.read().decode("utf-8")
+    try:
+        items = json.loads(raw)["response"]["body"]["items"]["item"]
+    except Exception:
+        raise RuntimeError(raw[:200])
+    by_day = {}
+    for it in items:
+        day = by_day.setdefault(it["fcstDate"], {"pop": [], "sky": [], "pty": [], "tmp": []})
+        hour = int(it["fcstTime"][:2])
+        cat, val = it["category"], it["fcstValue"]
+        if cat == "TMX":
+            day["max"] = float(val)
+        elif cat == "TMN":
+            day["min"] = float(val)
+        elif cat == "TMP":
+            day["tmp"].append(float(val))
+        elif cat == "POP":
+            day["pop"].append(int(val))
+        elif cat == "SKY" and 9 <= hour <= 18:
+            day["sky"].append(val)
+        elif cat == "PTY" and 6 <= hour <= 21 and val != "0":
+            day["pty"].append(val)
+    days = []
+    for ymd in sorted(by_day):
+        d = by_day[ymd]
+        if not d["pop"]:
+            continue
+        if d["pty"]:
+            emoji, text = KMA_PTY.get(max(set(d["pty"]), key=d["pty"].count), ("🌧", "비"))
+        elif d["sky"]:
+            emoji, text = KMA_SKY.get(max(set(d["sky"]), key=d["sky"].count), ("🌤", "-"))
+        else:
+            emoji, text = "🌤", "-"
+        days.append({
+            "date": datetime.strptime(ymd, "%Y%m%d"), "emoji": emoji, "text": text,
+            "max": round(d.get("max", max(d["tmp"] or [0]))), "min": round(d.get("min", min(d["tmp"] or [0]))),
+            "rain": max(d["pop"]),
+        })
+    if not days or days[0]["date"].date() != now.date():
+        raise RuntimeError("오늘 예보 없음")
+    return days
+
+
 def get_weather():
+    """기상청 예보를 먼저 쓰고, 안 되면 Open-Meteo로 대체"""
+    try:
+        return get_weather_kma()
+    except Exception as e:
+        print(f"[날씨] 기상청 실패 → Open-Meteo 사용: {e}")
     req = urllib.request.Request(WEATHER_URL, headers=UA)
     with urllib.request.urlopen(req, timeout=15) as resp:
         d = json.loads(resp.read().decode("utf-8"))["daily"]
