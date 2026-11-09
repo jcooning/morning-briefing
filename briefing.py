@@ -129,28 +129,28 @@ def rate_change(last, prev):
     return f"{arrow}{abs(diff):.2f}"
 
 
-def rates_line(closes):
+def rates_lines(closes):
     now = datetime.now(KST)
     parts = []
     try:
         base = ecos("722Y001", "M", f"{now.year - 1}{now.month:02d}", f"{now.year}{now.month:02d}", "0101000")
-        parts.append(f"기준 {base[-1]:.2f}%")
+        parts.append(f"기준금리 {base[-1]:.2f}%")
     except Exception as e:
         print(f"[금리 기준] 실패: {type(e).__name__}")
     try:
         start = (now - timedelta(days=9)).strftime("%Y%m%d")
         govt = ecos("817Y002", "D", start, now.strftime("%Y%m%d"), "010200000")
-        parts.append(f"국고3년 {govt[-1]:.2f}% ({rate_change(govt[-1], govt[-2])})")
+        parts.append(f"국고채 3년 {govt[-1]:.2f}% ({rate_change(govt[-1], govt[-2])})")
     except Exception as e:
         print(f"[금리 국고3년] 실패: {type(e).__name__}")
     try:
         series = closes["^TNX"].dropna() if "^TNX" in closes else None
         if series is None or len(series) < 2:
             series = yf.Ticker("^TNX").history(period="10d")["Close"].dropna()
-        parts.append(f"미국10년 {float(series.iloc[-1]):.2f}% ({rate_change(float(series.iloc[-1]), float(series.iloc[-2]))})")
+        parts.append(f"미국채 10년 {float(series.iloc[-1]):.2f}% ({rate_change(float(series.iloc[-1]), float(series.iloc[-2]))})")
     except Exception as e:
         print(f"[금리 미국10년] 실패: {type(e).__name__}")
-    return "금리 " + " · ".join(parts) if parts else "금리 조회 실패"
+    return parts or ["금리 조회 실패"]  # 한 줄에 하나씩
 
 
 # ---------------- 오늘의 말씀 (개역한글) ----------------
@@ -199,6 +199,111 @@ def bible_section():
     return f"📖 오늘의 말씀\n{text}\n— {name} {chapter}:{verse}"
 
 
+# ---------------- 머릿말 인사 ----------------
+GREETINGS = {  # 요일별 (월=0 … 일=6)
+    0: ["한 주 시작이에요, 커피 한 잔 하고 출발 ☕", "새로운 한 주, 가볍게 시작해요 🌱",
+        "월요일도 둘이 함께면 거뜬해요 💪", "이번 주도 좋은 일 가득하길 🍀"],
+    1: ["화요일, 어제보다 한결 가벼운 하루 되길 🙂", "오늘도 차근차근 해 봐요 🐾",
+        "화이팅 넘치는 화요일이에요 🔥", "든든하게 아침 챙겨 먹고 나가요 🍚"],
+    2: ["벌써 한 주의 반이에요, 힘내요 🐢💨", "수요일, 반 왔어요! 조금만 더 🙌",
+        "한 주의 한가운데, 잠깐 숨 고르고 가요 🌿", "오늘은 달달한 간식 하나 어때요? 🍪"],
+    3: ["내일이면 금요일, 조금만 더 버텨요 🍀", "목요일도 웃으면서 시작해요 😊",
+        "주말이 코앞이에요, 화이팅 ✨", "오늘 하루도 무사히, 사뿐사뿐 🐾"],
+    4: ["드디어 금요일! 오늘만 버티면 주말이에요 🎉", "불금이에요, 저녁엔 맛있는 거 먹어요 🍗",
+        "한 주 고생 많았어요, 마지막 힘내요 💛", "금요일 아침은 언제나 설레요 🥳"],
+    5: ["여유로운 토요일 아침이에요 🥐", "늦잠 자도 되는 날, 푹 쉬어요 🛋",
+        "주말이다! 오늘은 뭐 하고 놀까요? 🎈", "느긋하게 커피부터 한 잔 ☕"],
+    6: ["포근한 일요일 아침이에요 🌤", "일요일엔 천천히, 아무것도 안 해도 괜찮아요 🛌",
+        "내일을 위해 오늘은 충전하는 날 🔋", "맛있는 브런치 어때요? 🥞"],
+}
+RAIN_GREETINGS = ["비 소식이 있어요, 우산 꼭 챙겨요 ☂️", "오늘은 우산이 필수예요 ☔",
+                  "비 오는 날, 미끄럼 조심하고 따뜻하게 다녀와요 🌧"]
+COLD_GREETINGS = ["많이 추워요, 목도리 꼭 하고 나가요 🧣", "꽁꽁 추운 아침이에요, 따뜻하게 입어요 🧤",
+                  "영하의 날씨예요, 감기 조심해요 🤧"]
+
+
+def greeting(now, days, holiday):
+    rng = random.Random(now.strftime("%Y%m%d") + "hello")
+    if holiday:
+        return f"오늘은 {holiday}! 푹 쉬고 즐겁게 보내요 🎈"
+    if days and days[0]["rain"] >= 60:
+        return rng.choice(RAIN_GREETINGS)
+    if days and days[0]["min"] <= 0:
+        return rng.choice(COLD_GREETINGS)
+    return rng.choice(GREETINGS[now.weekday()])
+
+
+# ---------------- 오늘 통통이와 퐁퐁이는 ----------------
+COUPLE_LINES = [
+    "서로의 제일 든든한 편이 되어 주기로 해요.",
+    "힘든 하루여도 저녁엔 같이 웃기로 해요.",
+    "고맙다는 말을 한 번 더 하기로 해요.",
+    "잘 안 풀리는 일은 맛있는 거 먹고 같이 털어 버리기로 해요.",
+    "출근길에 '잘 다녀와' 한마디 꼭 하기로 해요.",
+    "완벽하지 않아도 괜찮은 한 팀이에요.",
+    "오르막길도 손잡고 천천히 같이 걸어요.",
+    "작은 일에도 같이 웃어 주기로 해요.",
+    "오늘 하루도 무사히 보내고 저녁에 꼭 안아 주기로 해요.",
+    "세상이 거칠어도 우리 집만큼은 따뜻하게 지켜요.",
+    "서로에게 제일 다정한 사람이 되어 주기로 해요.",
+    "말 한마디도 예쁘게 하기로 해요.",
+    "서로의 하루를 궁금해하고 들어 주기로 해요.",
+    "속상한 일이 있으면 혼자 끙끙대지 말고 나누기로 해요.",
+    "오늘도 서로를 믿고 응원하기로 해요.",
+    "바빠도 밥은 꼭 챙겨 먹으라고 서로 챙기기로 해요.",
+    "서로의 작은 수고를 알아봐 주기로 해요.",
+    "오늘 저녁엔 휴대폰 내려놓고 눈 맞추며 이야기하기로 해요.",
+    "서운한 마음은 그날 바로 풀기로 해요.",
+    "서로의 꿈을 제일 먼저 응원해 주기로 해요.",
+    "지친 날엔 말없이 등 토닥여 주기로 해요.",
+    "같이라서 오늘도 든든해요.",
+    "서로에게 쉼표가 되어 주기로 해요.",
+    "오늘의 수고를 서로 꼭 칭찬해 주기로 해요.",
+    "한 번 더 웃고, 한 번 덜 투덜대기로 해요.",
+    "우리 속도대로 천천히, 그래도 같이 가요.",
+    "비가 와도 바람이 불어도 손은 꼭 잡고 가요.",
+    "서로의 건강을 제일 먼저 챙기기로 해요.",
+    "오늘 하루 서로에게 따뜻한 커피 같은 사람이 되기로 해요.",
+    "잘한 일은 크게 기뻐해 주고, 실수는 웃으며 넘기기로 해요.",
+    "서로 마주 보며 '오늘도 사랑해' 말해 주기로 해요.",
+    "힘든 순간에도 우리 편이 있다는 걸 잊지 않기로 해요.",
+    "서로의 웃음이 제일 좋은 선물이에요.",
+    "오늘은 서로에게 칭찬 하나씩 해 주기로 해요.",
+    "조급해하지 말고, 지금 여기서 같이 행복하기로 해요.",
+    "서로에게 기대도 괜찮다는 걸 잊지 않기로 해요.",
+    "오늘 하루, 서로를 조금 더 아껴 주기로 해요.",
+    "작은 약속도 소중히 지키기로 해요.",
+    "서로의 마음을 먼저 헤아려 주기로 해요.",
+    "오늘도 집에 돌아오는 길이 기다려지는 하루 보내요.",
+    "우리가 함께한 시간만큼 오늘도 더 단단해져요.",
+    "실패해도 괜찮아요, 우리는 다시 같이 하면 되니까.",
+    "오늘도 서로의 자랑이 되어 주기로 해요.",
+    "지나간 걱정보다 오늘의 웃음을 더 챙기기로 해요.",
+    "서로를 향한 고마움을 마음에 꼭 담아 두기로 해요.",
+    "오늘은 서로에게 조금 더 너그러워지기로 해요.",
+    "함께 먹는 저녁 한 끼를 오늘의 작은 행복으로 삼아요.",
+    "서로의 손을 잡으면 어떤 하루도 견딜 만해요.",
+    "오늘도 서로의 이름을 다정하게 불러 주기로 해요.",
+    "힘들 땐 쉬어 가도 괜찮아요, 옆에 우리가 있으니까.",
+    "서로의 좋은 점을 하나씩 더 찾아보기로 해요.",
+    "오늘은 서로 먼저 연락해서 안부 묻기로 해요.",
+    "세상의 속도에 휩쓸리지 말고 우리만의 속도로 가요.",
+    "작은 행복을 크게 기뻐하는 하루 보내기로 해요.",
+    "서로에게 '수고했어' 한마디로 하루를 마무리하기로 해요.",
+    "오늘 생긴 좋은 일은 저녁에 꼭 같이 나누기로 해요.",
+    "서로가 있어 오늘도 감사한 하루예요.",
+    "어떤 날이든 우리는 서로의 집이에요.",
+    "내일도 모레도, 오늘처럼 같이 웃기로 해요.",
+    "오늘도 사이좋게, 다정하게, 씩씩하게!",
+]
+
+
+def couple_section():
+    now = datetime.now(KST)
+    line = random.Random(now.strftime("%Y%m%d") + "us").choice(COUPLE_LINES)
+    return f"💌 오늘 통통이와 퐁퐁이는\n{line}"
+
+
 def market_section():
     items = MARKET + STOCKS
     codes = [code for _, code, _ in items] + ["^TNX"]  # ^TNX = 미국 10년 국채금리
@@ -213,10 +318,10 @@ def market_section():
 
     lines = ["📈 증시"]
     for i, (name, code, unit) in enumerate(items):
-        if i in (4, 7, len(MARKET), len(MARKET) + len(KR_STOCKS)):
-            lines.append("")  # 지수 / 환율 / 코인 / 국내 종목 / 미국 종목 사이 빈 줄
+        if i in (4, len(MARKET), len(MARKET) + len(KR_STOCKS)):
+            lines.append("")  # 지수 / 금리·환율·코인 / 국내 종목 / 미국 종목 사이 빈 줄
         if i == 4:
-            lines.append(rates_line(closes))  # 금리는 달러 위에
+            lines += rates_lines(closes) + [""]  # 금리는 환율 위에, 한 줄씩
         try:
             series = closes[code].dropna() if code in closes else None
             group = "kr" if (name, code, unit) in KR_STOCKS else "us" if (name, code, unit) in US_STOCKS else None
@@ -515,6 +620,7 @@ LEASE_PAGES = [
 ]
 LEASE_TYPES = ["장기전세", "행복주택"]
 OPEN_WORDS = ("모집중", "접수중", "모집예정", "접수예정", "공고중", "상담요청")
+NEW_DAYS = 2  # 공고 후 이틀 동안 🆕 표시
 
 
 def find_col(headers, *names):
@@ -584,7 +690,8 @@ def apt_notices():
         end = r.get("RCEPT_ENDDE") or ""
         if end and end < today.isoformat():
             continue
-        result.append((r.get("RCEPT_BGNDE") or "", r.get("HOUSE_NM", ""), end, r.get("TOT_SUPLY_HSHLDCO")))
+        result.append((r.get("RCEPT_BGNDE") or "", r.get("HOUSE_NM", ""), end,
+                       r.get("TOT_SUPLY_HSHLDCO"), r.get("RCRIT_PBLANC_DE") or ""))
     return sorted(result)
 
 
@@ -596,34 +703,57 @@ def short_date(iso):
         return iso
 
 
+def to_date(iso):
+    try:
+        return datetime.strptime(iso[:10], "%Y-%m-%d").date()
+    except (ValueError, TypeError):
+        return None
+
+
+def is_new(posted, today):
+    d = to_date(posted)
+    return d is not None and 0 <= (today - d).days <= NEW_DAYS
+
+
+def d_day(target, today):
+    d = to_date(target)
+    if d is None:
+        return ""
+    gap = (d - today).days
+    return "D-day" if gap == 0 else f"D-{gap}" if gap > 0 else ""
+
+
 def cheongyak_section():
-    lines = ["🏢 서울 청약"]
+    """공고가 없으면 한 줄, 있으면 있는 것만 보여줍니다."""
+    today = datetime.now(KST).date()
+    lines, failed = [], []
     try:
         apts = apt_notices()
-        if apts is None:
-            pass  # 키가 없으면 일반 분양은 건너뜀
-        elif apts:
-            for start, name, end, units in apts[:5]:
-                unit = f" · {units}세대" if units else ""
-                lines.append(f"[일반] {name} · 접수 {short_date(start)}~{short_date(end)}{unit}")
-        else:
-            lines.append("[일반] 접수 예정·진행 중인 단지 없음")
+        for start, name, end, units, posted in (apts or [])[:5]:
+            mark = "🆕 " if is_new(posted, today) else ""
+            unit = f" · {units}세대" if units else ""
+            start_d = to_date(start)
+            if start_d and start_d > today:
+                when = f"접수 {short_date(start)}~{short_date(end)} ({d_day(start, today)})"
+            else:
+                when = f"접수 중 ~{short_date(end)} (마감 {d_day(end, today)})"
+            lines.append(f"{mark}[일반] {name} · {when}{unit}")
     except Exception as e:
         print(f"[청약 일반] 실패: {e}")
-        lines.append("[일반] 조회 실패")
+        failed.append("일반")
     try:
-        leases = lease_notices()
-        for label in LEASE_TYPES:
-            mine = [x for x in leases if x[0] == label]
-            for _, title, posted, end, status in mine[:3]:
-                until = f" · ~{short_date(end)} 마감" if end else ""
-                lines.append(f"[{label}] {title} · 공고 {short_date(posted)}{until} · {status}")
-            if not mine:
-                lines.append(f"[{label}] 모집 중인 공고 없음")
+        for label, title, posted, end, status in lease_notices()[:6]:
+            mark = "🆕 " if is_new(posted, today) else ""
+            dd = d_day(end, today)
+            when = f"접수 ~{short_date(end)} (마감 {dd})" if end and dd else status
+            lines.append(f"{mark}[{label}] {title} · {when}")
     except Exception as e:
         print(f"[청약 임대] 실패: {e}")
-        lines.append("[장기전세·행복주택] 조회 실패")
-    return "\n".join(lines)
+        failed.append("장기전세·행복주택")
+    note = f" ({'·'.join(failed)} 조회 실패)" if failed else ""
+    if not lines:
+        return f"🏢 서울 청약: 모집 중인 공고 없음{note}"
+    return "\n".join(["🏢 서울 청약" + note] + lines)
 
 
 def gold_section():
@@ -633,17 +763,29 @@ def gold_section():
     return f"🥇 금시세\n국제 금 ${last:,.2f}/oz ({fmt_change(last, prev)})"
 
 
+def holiday_name(day):
+    """한국 공휴일이면 이름(예: 추석, 대체공휴일), 아니면 빈 문자열"""
+    try:
+        import holidays
+        return holidays.country_holidays("KR", language="ko").get(day) or ""
+    except Exception as e:
+        print(f"[공휴일] 확인 실패: {e}")
+        return ""
+
+
 def main():
     now = datetime.now(KST)
-    header = f"☀ {now.month}/{now.day}({WEEKDAYS[now.weekday()]}) 아침 브리핑"
+    holiday = holiday_name(now.date())
+    day_label = f"{WEEKDAYS[now.weekday()]}, {holiday}" if holiday else WEEKDAYS[now.weekday()]
+    header = f"🐶🐹 통통이와 퐁퐁이의 아침 · {now.month}/{now.day}({day_label})"
     try:
         days = get_weather()
     except Exception as e:
         print(f"[날씨] 실패: {e}")
         days = None
 
-    # briefing.txt — 제목·날씨·증시·뉴스·청약·국제 금 (이 뒤에 아이폰이 순금 시세를 붙임)
-    top = header + "\n" + (today_weather(days) if days else "날씨 조회 실패")
+    # briefing.txt — 제목·날씨·증시·뉴스·국제 금 (이 뒤에 아이폰이 순금 시세를 붙임)
+    top = header + "\n" + greeting(now, days, holiday) + "\n\n" + (today_weather(days) if days else "날씨 조회 실패")
     sections = [top]
     try:
         sections.append(market_section())
@@ -672,6 +814,7 @@ def main():
         bottom.append(bible_section())
     except Exception as e:
         print(f"[성경] 실패: {e}")
+    bottom.append(couple_section())
     with open("briefing2.txt", "w", encoding="utf-8") as f:
         f.write("\n\n".join(bottom) + "\n")
 
