@@ -2,9 +2,9 @@ name: 아침 브리핑
 
 on:
   schedule:
-    - cron: "17 21 * * *"  # 매일 한국시간 06:17
+    - cron: "17 21 * * *"  # 매일 한국시간 06:17 (예비)
     - cron: "13 22 * * *"  # 매일 한국시간 07:13 (예비)
-  workflow_dispatch:        # 수동 실행 버튼
+  workflow_dispatch:        # 수동 실행 버튼 + 아이폰 8:10 자동 실행
 
 permissions:
   contents: write
@@ -20,7 +20,7 @@ jobs:
           python-version: "3.12"
 
       - name: 라이브러리 설치
-        run: pip install yfinance
+        run: pip install yfinance holidays
 
       - name: 브리핑 만들기
         run: python briefing.py
