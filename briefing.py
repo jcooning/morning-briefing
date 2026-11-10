@@ -45,6 +45,19 @@ US_STOCKS = [  # 미국 관심종목
     ("팔란티어", "PLTR", "usd"),
 ]
 STOCKS = KR_STOCKS + US_STOCKS
+KR_INDEX = MARKET[0:2]   # 코스피, 코스닥
+US_INDEX = MARKET[2:4]   # S&P500, 나스닥
+NAVER_INDEX = {"^KS11": "KOSPI", "^KQ11": "KOSDAQ"}
+
+
+def naver_index(code):
+    """네이버 증권의 국내 지수 (현재가/종가, 등락률%)"""
+    req = urllib.request.Request(f"https://m.stock.naver.com/api/index/{code}/basic", headers=UA)
+    with urllib.request.urlopen(req, timeout=15) as resp:
+        d = json.loads(resp.read().decode("utf-8"))
+    price = float(str(d["closePrice"]).replace(",", ""))
+    pct = float(str(d["fluctuationsRatio"]).replace(",", ""))
+    return price, pct
 
 
 def fmt_price(value, unit):
@@ -60,8 +73,10 @@ def fmt_price(value, unit):
 
 
 def fmt_change(last, prev):
-    pct = (last - prev) / prev * 100
-    arrow = "▲" if pct > 0 else ("▼" if pct < 0 else "-")
+    pct = round((last - prev) / prev * 100, 1)
+    if pct == 0:
+        return "-"
+    arrow = "▲" if pct > 0 else "▼"
     return f"{arrow}{abs(pct):.1f}%"
 
 
@@ -172,7 +187,8 @@ def weather_line(day):
 
 
 def today_weather(days):
-    return "성수동 " + weather_line(days[0])
+    d = days[0]
+    return f"성수동 {d['emoji']} {d['text']}\n최고 {d['max']}° · 최저 {d['min']}° · 강수 {d['rain']}%"
 
 
 def weekend_weather(days):
@@ -193,8 +209,10 @@ def ecos(stat, cycle, start, end, item):
 
 
 def rate_change(last, prev):
-    diff = last - prev
-    arrow = "▲" if diff > 0 else ("▼" if diff < 0 else "-")
+    diff = round(last - prev, 2)
+    if diff == 0:
+        return "-"
+    arrow = "▲" if diff > 0 else "▼"
     return f"{arrow}{abs(diff):.2f}"
 
 
@@ -383,7 +401,7 @@ def market_section():
         days = [closes[c].dropna().index[-1].date() for _, c, _ in group
                 if c in closes and len(closes[c].dropna())]
         return max(days) if days else None
-    newest = {"kr": latest_day(KR_STOCKS), "us": latest_day(US_STOCKS)}
+    newest = {"kr": latest_day(KR_STOCKS + KR_INDEX), "us": latest_day(US_STOCKS + US_INDEX)}
 
     lines = ["📈 증시"]
     for i, (name, code, unit) in enumerate(items):
@@ -393,7 +411,8 @@ def market_section():
             lines += rates_lines(closes) + [""]  # 금리는 환율 위에, 한 줄씩
         try:
             series = closes[code].dropna() if code in closes else None
-            group = "kr" if (name, code, unit) in KR_STOCKS else "us" if (name, code, unit) in US_STOCKS else None
+            item = (name, code, unit)
+            group = "kr" if item in KR_STOCKS + KR_INDEX else "us" if item in US_STOCKS + US_INDEX else None
             stale = (series is not None and len(series) and group and newest[group]
                      and series.index[-1].date() < newest[group])
             if series is None or len(series) < 2 or stale:
@@ -402,6 +421,17 @@ def market_section():
                     series = retry
                 if stale:
                     print(f"[증시] {name} 최신값 누락 → 재조회 (마지막 {series.index[-1].date()})")
+            still_stale = group and newest[group] and series.index[-1].date() < newest[group]
+            if still_stale and code in NAVER_INDEX:
+                try:  # 국내 지수는 네이버 증권 값으로 대체
+                    price, pct = naver_index(NAVER_INDEX[code])
+                    sign = "-" if pct == 0 else ("▲" if pct > 0 else "▼")
+                    change = "-" if pct == 0 else f"{sign}{abs(pct):.1f}%"
+                    lines.append(f"{name} {fmt_price(price, unit)} ({change})")
+                    print(f"[증시] {name} 네이버 값 사용")
+                    continue
+                except Exception as e:
+                    print(f"[증시] {name} 네이버 실패: {e}")
             last, prev = float(series.iloc[-1]), float(series.iloc[-2])
             lines.append(f"{name} {fmt_price(last, unit)} ({fmt_change(last, prev)})")
         except Exception:
@@ -426,6 +456,10 @@ NEWS = [
         ("한국경제", "https://www.hankyung.com/feed/realestate"),
         ("매일경제", "https://www.mk.co.kr/rss/50300009/"),
     ], "부동산 청약"),
+    ("🎨 문화·예술", [
+        ("JTBC", "https://news-ex.jtbc.co.kr/v1/get/rss/section/culture"),
+        ("연합뉴스", "https://www.yna.co.kr/rss/culture.xml"),
+    ], "전시 공연 미술"),
 ]
 MBC_LIST_PAGES = [  # 네이버 뉴스의 MBC(언론사 번호 214) 기사 목록
     "https://news.naver.com/main/list.naver?mode=LPOD&mid=sec&oid=214&listType=summary",
@@ -593,8 +627,8 @@ def ai_summarize(collected, mbc):
     prompt = (
         "너는 아침 뉴스 브리핑 편집자다. 아래 분야별 기사 목록에서, 분야마다 "
         f"오늘 아침 꼭 알아야 할 중요한 기사 {NEWS_PER_SECTION}개를 골라라.\n"
-        "- MBC 최신 기사 목록은 정치·경제·부동산 분야에만 쓴다. 해당 분야의 중요한 MBC 기사가 있으면 우선으로 넣고, 부족하면 그 분야 목록의 다른 언론사 기사로 채운다. IT 분야는 IT 목록에서만 고른다. 한 기사는 한 분야에만 쓴다.\n"
-        "- 분야 기준을 엄격히 지킨다. 정치=국회·정당·대통령·정부 인사·외교·북한. 경제=증시·금리·환율·물가·기업 실적·산업·무역. 부동산=집값·청약·재건축·부동산 정책과 대출 규제. IT=AI·반도체·통신·플랫폼·과학기술(IT 매체 기사라도 증시 시황·금융 정책·법원 판결은 IT에 넣지 않는다). 사건사고·연예·스포츠·날씨는 어느 분야에도 넣지 않는다.\n"
+        "- MBC 최신 기사 목록은 정치·경제·부동산·문화예술 분야에만 쓴다. 해당 분야의 중요한 MBC 기사가 있으면 우선으로 넣고, 부족하면 그 분야 목록의 다른 언론사 기사로 채운다. IT 분야는 IT 목록에서만 고른다. 한 기사는 한 분야에만 쓴다.\n"
+        "- 분야 기준을 엄격히 지킨다. 정치=국회·정당·대통령·정부 인사·외교·북한. 경제=증시·금리·환율·물가·기업 실적·산업·무역. 부동산=집값·청약·재건축·부동산 정책과 대출 규제. IT=AI·반도체·통신·플랫폼·과학기술(IT 매체 기사라도 증시 시황·금융 정책·법원 판결·기업 합병·공시·금융감독 기사는 IT에 넣지 않는다). 문화예술=전시·미술·공연·영화·책·문화정책·문화유산(연예인 사생활·열애·가십은 제외). 사건사고·스포츠·날씨는 어느 분야에도 넣지 않는다.\n"
         "- 광고성·가벼운 화제·같은 사건의 중복 기사는 제외한다.\n"
         "- 각 기사를 사실 위주로 한국어 1~2문장(90자 이내)으로 요약한다. 제목을 그대로 옮기지 말고 핵심 내용을 풀어 쓴다.\n"
         "- 주어진 제목과 설명에 없는 내용은 추측해서 쓰지 않는다. 의견이나 평가는 덧붙이지 않는다.\n"
@@ -845,8 +879,10 @@ def holiday_name(day):
 def main():
     now = datetime.now(KST)
     holiday = holiday_name(now.date())
-    day_label = f"{WEEKDAYS[now.weekday()]}, {holiday}" if holiday else WEEKDAYS[now.weekday()]
-    header = f"🐶🐹 통통이와 퐁퐁이의 아침 · {now.month}/{now.day}({day_label})"
+    date_line = f"{now.year}년 {now.month}월 {now.day}일 {WEEKDAYS[now.weekday()]}요일"
+    if holiday:
+        date_line += f" · {holiday}"
+    header = date_line + "\n🐶 통통이와 퐁퐁이의 아침 🐹"
     try:
         days = get_weather()
     except Exception as e:
